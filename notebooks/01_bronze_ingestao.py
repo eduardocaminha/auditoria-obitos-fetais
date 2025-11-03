@@ -98,8 +98,7 @@ SELECT
     LAUP.DS_LAUDO_MEDICO,
     PREA.DT_PROCEDIMENTO_REALIZADO,
     ATE.CD_PACIENTE,
-    PAC.NM_PACIENTE,
-    CURRENT_TIMESTAMP AS DT_INGESTAO
+    PAC.NM_PACIENTE
 FROM RAWZN.RAW_HSP_TB_PROCEDIMENTO_REALIZADO PREA
 INNER JOIN RAWZN.RAW_HSP_TB_PROCEDIMENTO P
     ON PREA.CD_PROCEDIMENTO = P.CD_PROCEDIMENTO
@@ -128,8 +127,7 @@ SELECT
     LAUP.DS_LAUDO_MEDICO,
     PREA.DT_PROCEDIMENTO_REALIZADO,
     ATE.CD_PACIENTE,
-    PAC.NM_PACIENTE,
-    CURRENT_TIMESTAMP AS DT_INGESTAO
+    PAC.NM_PACIENTE
 FROM RAWZN.RAW_PSC_TB_PROCEDIMENTO_REALIZADO PREA
 INNER JOIN RAWZN.RAW_PSC_TB_PROCEDIMENTO P
     ON PREA.CD_PROCEDIMENTO = P.CD_PROCEDIMENTO
@@ -152,6 +150,10 @@ df_pandas = run_sql(query)
 
 # Converter para Spark DataFrame
 df_spark = spark.createDataFrame(df_pandas)
+
+# Adicionar timestamp de ingestão no Spark (evita problemas de tipo com Oracle TIMESTAMP)
+from pyspark.sql.functions import current_timestamp
+df_spark = df_spark.withColumn("DT_INGESTAO", current_timestamp())
 
 print(f"✅ Laudos extraídos: {df_spark.count()} registros")
 
