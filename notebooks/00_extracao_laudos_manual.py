@@ -124,6 +124,22 @@ else:
     df = pd.DataFrame(laudos_pd)
     # Defensivo
     df = df[df['DS_LAUDO_MEDICO'].astype(str).str.strip().str.len() > 0]
+    
+    # Estatísticas
+    total_exames = len(df)
+    pacientes_unicos = df['CD_PACIENTE'].nunique()
+    exames_por_fonte = df.groupby('FONTE').size()
+    
+    print("=" * 80)
+    print("ESTATÍSTICAS DE EXTRAÇÃO")
+    print("=" * 80)
+    print(f"Total de exames: {total_exames:,}")
+    print(f"Pacientes únicos: {pacientes_unicos:,}")
+    print(f"Média de exames por paciente: {(total_exames / pacientes_unicos):.2f}")
+    print(f"\nPor fonte:")
+    for fonte, qtd in exames_por_fonte.items():
+        print(f"  {fonte}: {qtd:,} exames")
+    print("=" * 80)
 
     # COMMAND ----------
 
@@ -143,7 +159,7 @@ else:
             decimal=',',
             compression='gzip'
         )
-        print(f"✅ CSV salvo: {CSV_PATH} | Registros: {len(df)} (gzip)")
+        print(f"✅ CSV salvo: {CSV_PATH} | Registros: {len(df):,} exames ({pacientes_unicos:,} pacientes únicos)")
     else:
         num_parts = (len(df) + CHUNK_SIZE - 1) // CHUNK_SIZE
         for part_idx in range(num_parts):
@@ -159,5 +175,6 @@ else:
                 decimal=',',
                 compression='gzip'
             )
-            print(f"✅ CSV salvo: {CSV_PATH} | Registros: {len(df)} (gzip)")
+            pacientes_part = part_df['CD_PACIENTE'].nunique()
+            print(f"✅ CSV salvo: {CSV_PATH} | Registros: {len(part_df):,} exames ({pacientes_part:,} pacientes únicos)")
 

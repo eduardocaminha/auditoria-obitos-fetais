@@ -116,6 +116,18 @@ for col in colunas_esperadas:
     else:
         print(f"✅ Coluna '{col}' encontrada")
 
+# Verificar se tem informações de paciente
+tem_cd_paciente = 'CD_PACIENTE' in df.columns
+tem_nm_paciente = 'NM_PACIENTE' in df.columns
+
+if tem_cd_paciente:
+    print(f"✅ Coluna 'CD_PACIENTE' encontrada")
+else:
+    print(f"⚠️  AVISO: Coluna 'CD_PACIENTE' não encontrada - estatísticas por paciente não estarão disponíveis")
+    
+if tem_nm_paciente:
+    print(f"✅ Coluna 'NM_PACIENTE' encontrada")
+
 # Preview dos dados
 display(df.head(3))
 
@@ -336,15 +348,49 @@ df["obito_fetal_clinico"] = resultados.apply(lambda x: x[0])
 df["termo_detectado"] = resultados.apply(lambda x: x[1])
 
 # Estatísticas
-total = len(df)
-positivos = df["obito_fetal_clinico"].sum()
-percentual = (positivos / total * 100) if total > 0 else 0
+total_exames = len(df)
+positivos_exames = df["obito_fetal_clinico"].sum()
+percentual = (positivos_exames / total_exames * 100) if total_exames > 0 else 0
+
+# Estatísticas por paciente (se CD_PACIENTE estiver disponível)
+tem_cd_paciente = 'CD_PACIENTE' in df.columns
+
+if tem_cd_paciente:
+    pacientes_unicos_total = df['CD_PACIENTE'].nunique()
+    df_positivos_pacientes = df[df["obito_fetal_clinico"] == 1]
+    pacientes_com_obito = df_positivos_pacientes['CD_PACIENTE'].nunique() if len(df_positivos_pacientes) > 0 else 0
+    
+    # Pacientes com múltiplos exames
+    exames_por_paciente = df.groupby('CD_PACIENTE').size()
+    pacientes_multiplos_exames = (exames_por_paciente > 1).sum()
+    max_exames_paciente = exames_por_paciente.max() if len(exames_por_paciente) > 0 else 0
+else:
+    pacientes_unicos_total = 0
+    pacientes_com_obito = 0
+    pacientes_multiplos_exames = 0
+    max_exames_paciente = 0
 
 print("\n" + "=" * 80)
 print("RESULTADOS DA CLASSIFICAÇÃO")
 print("=" * 80)
-print(f"Total de laudos: {total:,}")
-print(f"Casos detectados: {positivos:,} ({percentual:.2f}%)")
+print(f"Total de exames processados: {total_exames:,}")
+
+if tem_cd_paciente:
+    print(f"Pacientes únicos: {pacientes_unicos_total:,}")
+    print(f"Pacientes com múltiplos exames: {pacientes_multiplos_exames:,}")
+    if max_exames_paciente > 1:
+        print(f"Máximo de exames por paciente: {max_exames_paciente}")
+    print()
+    print(f"Óbitos fetais detectados (exames): {positivos_exames:,} ({percentual:.2f}%)")
+    print(f"Pacientes com óbito fetal: {pacientes_com_obito:,}")
+    if pacientes_unicos_total > 0:
+        percentual_pacientes = (pacientes_com_obito / pacientes_unicos_total * 100)
+        print(f"Percentual de pacientes: {percentual_pacientes:.2f}%")
+else:
+    print()
+    print(f"Óbitos fetais detectados: {positivos_exames:,} ({percentual:.2f}%)")
+    print("⚠️  Estatísticas por paciente não disponíveis (CD_PACIENTE não encontrado no CSV)")
+
 print("=" * 80)
 
 # COMMAND ----------
@@ -358,16 +404,28 @@ print("=" * 80)
 df_positivos = df[df["obito_fetal_clinico"] == 1].copy()
 
 if len(df_positivos) > 0:
+    pacientes_positivos_unicos = df_positivos['CD_PACIENTE'].nunique() if tem_cd_paciente else 0
+    
     print("=" * 80)
     print(f"ANÁLISE DOS {len(df_positivos)} CASOS DETECTADOS")
     print("=" * 80)
+    print(f"Exames positivos: {len(df_positivos):,}")
+    
+    if tem_cd_paciente:
+        print(f"Pacientes únicos com óbito: {pacientes_positivos_unicos:,}")
+        if len(df_positivos) > pacientes_positivos_unicos:
+            print(f"   (Alguns pacientes têm múltiplos exames positivos)")
+    else:
+        print("⚠️  Estatísticas por paciente não disponíveis")
+    
+    print()
     
     # Estatísticas de termos detectados
     print("\n📊 DISTRIBUIÇÃO DOS TERMOS DETECTADOS:")
     termos_count = df_positivos["termo_detectado"].value_counts()
     for termo, count in termos_count.items():
         percentual = (count / len(df_positivos) * 100)
-        print(f"   - {termo}: {count} casos ({percentual:.1f}%)")
+        print(f"   - {termo}: {count} exames ({percentual:.1f}%)")
     print()
     
     # Mostrar primeiros 5 casos
@@ -411,8 +469,13 @@ df.to_csv(
 )
 
 print(f"✅ Resultados salvos (CSV único consolidado): {output_full_path}")
-print(f"   Total de registros: {len(df):,}")
-print(f"   Casos positivos: {positivos:,}")
+print(f"   Total de exames: {total_exames:,}")
+if tem_cd_paciente:
+    print(f"   Pacientes únicos: {pacientes_unicos_total:,}")
+    print(f"   Casos positivos (exames): {positivos_exames:,}")
+    print(f"   Pacientes com óbito fetal: {pacientes_com_obito:,}")
+else:
+    print(f"   Casos positivos: {positivos_exames:,}")
 print(f"   Origem: {len(arquivos_csv)} arquivo(s) CSV de entrada processado(s)")
 
 # COMMAND ----------
@@ -426,8 +489,13 @@ print("=" * 80)
 print("✅ PROCESSAMENTO CONCLUÍDO")
 print("=" * 80)
 print(f"\n📊 RESUMO:")
-print(f"   - Laudos processados: {total:,}")
-print(f"   - Óbitos fetais detectados: {positivos:,} ({percentual:.2f}%)")
+print(f"   - Exames processados: {total_exames:,}")
+if tem_cd_paciente:
+    print(f"   - Pacientes únicos: {pacientes_unicos_total:,}")
+    print(f"   - Óbitos fetais detectados (exames): {positivos_exames:,} ({percentual:.2f}%)")
+    print(f"   - Pacientes com óbito fetal: {pacientes_com_obito:,}")
+else:
+    print(f"   - Óbitos fetais detectados: {positivos_exames:,} ({percentual:.2f}%)")
 print(f"   - Arquivo salvo: {output_full_path}")
 print("\n📋 PRÓXIMOS PASSOS:")
 print("   1. Revisar amostra dos casos detectados")
