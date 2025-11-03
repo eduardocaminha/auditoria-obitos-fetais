@@ -510,12 +510,31 @@ print("   4. (Opcional) Ajustar padrões se necessário")
 
 # COMMAND ----------
 
-# Salvar apenas casos positivos para revisão
+# Salvar apenas casos positivos para revisão (único por paciente)
 if len(df_positivos) > 0:
     output_positivos = f"{OUTPUT_PATH}/obitos_fetais_apenas_positivos_{timestamp}.csv"
     
-    # Incluir termo_detectado no output dos positivos
-    df_positivos[[COLUNA_ATENDIMENTO, COLUNA_LAUDO, "termo_detectado"]].to_csv(
+    # Remover duplicatas por paciente (manter primeiro exame positivo de cada paciente)
+    if tem_cd_paciente:
+        df_positivos_unicos = df_positivos.drop_duplicates(
+            subset=['CD_PACIENTE'],
+            keep='first'
+        )
+        print(f"📊 Removendo duplicatas por paciente:")
+        print(f"   Antes: {len(df_positivos):,} exames positivos")
+        print(f"   Depois: {len(df_positivos_unicos):,} pacientes únicos")
+    else:
+        df_positivos_unicos = df_positivos
+        print(f"⚠️  CD_PACIENTE não disponível - não é possível remover duplicatas por paciente")
+    
+    # Selecionar colunas para exportação
+    colunas_export = [COLUNA_ATENDIMENTO, COLUNA_LAUDO, "termo_detectado"]
+    if tem_cd_paciente:
+        colunas_export.insert(0, 'CD_PACIENTE')
+    if tem_nm_paciente:
+        colunas_export.insert(1, 'NM_PACIENTE')
+    
+    df_positivos_unicos[colunas_export].to_csv(
         output_positivos,
         index=False,
         encoding='utf-8-sig',
@@ -523,7 +542,7 @@ if len(df_positivos) > 0:
         decimal=','
     )
     
-    print(f"✅ Casos positivos exportados: {output_positivos}")
-    print(f"   Registros: {len(df_positivos):,}")
-    print(f"   Colunas incluídas: {COLUNA_ATENDIMENTO}, {COLUNA_LAUDO}, termo_detectado")
+    print(f"✅ Casos positivos exportados (únicos por paciente): {output_positivos}")
+    print(f"   Registros: {len(df_positivos_unicos):,}")
+    print(f"   Colunas incluídas: {', '.join(colunas_export)}")
 
