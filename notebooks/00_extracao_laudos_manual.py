@@ -14,6 +14,8 @@ from pyspark.sql.functions import *
 from datetime import datetime
 import pandas as pd
 
+# COMMAND ----------
+
 # MAGIC %md
 # MAGIC ## Parâmetros
 # MAGIC - Período configurável: informe datas no formato 'YYYY-MM-DD'
