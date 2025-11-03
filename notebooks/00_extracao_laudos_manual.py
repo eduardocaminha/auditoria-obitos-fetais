@@ -148,7 +148,7 @@ else:
         num_parts = (len(df) + CHUNK_SIZE - 1) // CHUNK_SIZE
         for part_idx in range(num_parts):
             start = part_idx * CHUNK_SIZE
-            end = min((part_idx + 1) * CHUNK_SIZE, len(df))
+            end = __builtins__.min((part_idx + 1) * CHUNK_SIZE, len(df))
             part_df = df.iloc[start:end]
             CSV_PATH = f"{BASE_PATH}/{BASE_NAME}_part{part_idx + 1:02d}.csv.gz"
             part_df.to_csv(

@@ -41,17 +41,69 @@ import pandas as pd
 import unicodedata
 import re
 from datetime import datetime
+from pathlib import Path
+import glob
 
-# Carregar CSV
-print("Carregando CSV...")
-df = pd.read_csv(
-    INPUT_CSV_PATH,
-    compression='gzip',
-    sep=';',
-    encoding='utf-8'
-)
+# Detectar se o CSV está em múltiplas partes
+def detectar_partes_csv(caminho_base):
+    """
+    Detecta se o CSV está dividido em partes e retorna lista de arquivos
+    """
+    caminho_path = Path(caminho_base)
+    diretorio = caminho_path.parent
+    nome_base = caminho_path.stem.replace('.csv', '')  # Remove .csv se houver
+    extensao = caminho_path.suffix  # .gz ou .csv
+    
+    
+    # Padrão para partes: nome_base_part01.csv.gz, nome_base_part02.csv.gz, etc.
+    padrao_parts = str(diretorio / f"{nome_base}_part*.csv{extensao}")
+    arquivos_parts = sorted(glob.glob(padrao_parts))
+    
+    # Se encontrou partes, retornar todas
+    if arquivos_parts:
+        print(f"📦 Detectado CSV em {len(arquivos_parts)} partes")
+        return arquivos_parts
+    
+    # Se não encontrou partes, verificar se arquivo único existe
+    if caminho_path.exists() or Path(str(caminho_base)).exists():
+        return [str(caminho_base)]
+    
+    # Tentar sem extensão .gz
+    caminho_sem_gz = str(caminho_base).replace('.gz', '')
+    if Path(caminho_sem_gz).exists():
+        return [caminho_sem_gz]
+    
+    return []
 
-print(f"✅ CSV carregado: {len(df)} registros")
+# Carregar CSV (suporta múltiplas partes)
+print("🔍 Detectando arquivos CSV...")
+arquivos_csv = detectar_partes_csv(INPUT_CSV_PATH)
+
+if not arquivos_csv:
+    raise FileNotFoundError(f"❌ Nenhum arquivo CSV encontrado em: {INPUT_CSV_PATH}")
+
+print(f"📂 Arquivos detectados: {len(arquivos_csv)}")
+for i, arquivo in enumerate(arquivos_csv, 1):
+    print(f"   {i}. {arquivo}")
+
+# Carregar todos os arquivos e concatenar
+print("\n📥 Carregando CSVs...")
+dfs_parts = []
+
+for arquivo in arquivos_csv:
+    print(f"   Carregando: {Path(arquivo).name}...")
+    df_part = pd.read_csv(
+        arquivo,
+        compression='gzip' if arquivo.endswith('.gz') else None,
+        sep=';',
+        encoding='utf-8'
+    )
+    dfs_parts.append(df_part)
+    print(f"      ✅ {len(df_part)} registros")
+
+# Concatenar todos os DataFrames
+df = pd.concat(dfs_parts, ignore_index=True)
+print(f"\n✅ CSV consolidado: {len(df)} registros totais")
 
 # Verificar colunas disponíveis
 print(f"\nColunas disponíveis: {df.columns.tolist()}")
@@ -344,12 +396,12 @@ from pathlib import Path
 # Criar diretório de output se não existir
 Path(OUTPUT_PATH).mkdir(parents=True, exist_ok=True)
 
-# Nome do arquivo de saída
+# Nome do arquivo de saída (único, mesmo se CSV de entrada tinha partes)
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 output_filename = f"obitos_fetais_detectados_{timestamp}.csv"
 output_full_path = f"{OUTPUT_PATH}/{output_filename}"
 
-# Salvar CSV
+# Salvar CSV único (consolidado)
 df.to_csv(
     output_full_path,
     index=False,
@@ -358,9 +410,10 @@ df.to_csv(
     decimal=','
 )
 
-print(f"✅ Resultados salvos: {output_full_path}")
+print(f"✅ Resultados salvos (CSV único consolidado): {output_full_path}")
 print(f"   Total de registros: {len(df):,}")
 print(f"   Casos positivos: {positivos:,}")
+print(f"   Origem: {len(arquivos_csv)} arquivo(s) CSV de entrada processado(s)")
 
 # COMMAND ----------
 
