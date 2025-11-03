@@ -190,6 +190,8 @@ print(f"✅ Laudos válidos após limpeza: {df_spark.count()} registros")
 # MAGIC %md
 # MAGIC ## 5. Salvar em Delta Lake (Bronze)
 
+# COMMAND ----------
+
 # Salvar em Delta Lake com append (evita duplicatas pela chave)
 df_spark.write \
     .format("delta") \
