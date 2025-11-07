@@ -102,7 +102,7 @@ if not bronze_pd.empty:
     def classificar_obito_fetal(texto_norm, texto_original):
         match_encontrado = None
         pattern_match = None
-
+        
         for pattern_tuple in patterns_obito:
             pattern = pattern_tuple[0]
             match = re.search(pattern, texto_norm)
@@ -116,7 +116,7 @@ if not bronze_pd.empty:
 
         if not has_ig_above_22_semanas(texto_norm):
             return (0, None)
-
+        
         texto_original_str = str(texto_original)
         texto_original_norm = normalize_text(texto_original_str)
 
@@ -153,9 +153,9 @@ if not bronze_pd.empty:
         contexto = 50
         inicio_contexto = max(0, pos_inicio - contexto)
         fim_contexto = min(len(texto_original_str), pos_fim + contexto)
-
+        
         trecho_capturado = texto_original_str[inicio_contexto:fim_contexto].strip()
-
+        
         return (1, trecho_capturado)
 
     bronze_pd['texto_norm'] = bronze_pd['DS_LAUDO_MEDICO'].apply(normalize_text)
@@ -166,6 +166,18 @@ if not bronze_pd.empty:
     bronze_pd['termo_detectado'] = bronze_pd['classificacao'].apply(lambda x: x[1])
 
     silver_pd = bronze_pd[bronze_pd['obito_fetal_clinico'] == 1].copy()
+    
+    # Remover duplicatas baseado em LAUDO_ID (se existir) ou criar chave única
+    if 'LAUDO_ID' in silver_pd.columns:
+        silver_pd = silver_pd.drop_duplicates(subset=['LAUDO_ID'], keep='first')
+    else:
+        silver_pd['LAUDO_ID'] = (
+            silver_pd['FONTE'].astype(str) + '_' +
+            silver_pd['CD_ATENDIMENTO'].astype(str) + '_' +
+            silver_pd['CD_OCORRENCIA'].astype(str) + '_' +
+            silver_pd['CD_ORDEM'].astype(str)
+        )
+        silver_pd = silver_pd.drop_duplicates(subset=['LAUDO_ID'], keep='first')
 
     print(f"Laudos positivos identificados: {len(silver_pd):,}")
 
@@ -192,20 +204,26 @@ if not bronze_pd.empty:
         except AnalysisException:
             print("ℹ️ Nenhum laudo positivo encontrado e tabela Silver ainda não existe.")
     else:
+        # Converter tipos com segurança
         silver_pd['dt_procedimento_realizado'] = pd.to_datetime(
             silver_pd['dt_procedimento_realizado'], errors='coerce'
         )
+        
+        # Garantir tipos string nas colunas de código
+        for col in ['cd_atendimento', 'cd_ocorrencia', 'cd_ordem', 'cd_procedimento', 'cd_paciente']:
+            if col in silver_pd.columns:
+                silver_pd[col] = silver_pd[col].astype(str)
 
         silver_schema = T.StructType([
             T.StructField('fonte', T.StringType(), True),
-            T.StructField('cd_atendimento', T.LongType(), True),
-            T.StructField('cd_ocorrencia', T.LongType(), True),
-            T.StructField('cd_ordem', T.LongType(), True),
-            T.StructField('cd_procedimento', T.LongType(), True),
+            T.StructField('cd_atendimento', T.StringType(), True),
+            T.StructField('cd_ocorrencia', T.StringType(), True),
+            T.StructField('cd_ordem', T.StringType(), True),
+            T.StructField('cd_procedimento', T.StringType(), True),
             T.StructField('nm_procedimento', T.StringType(), True),
             T.StructField('texto_original', T.StringType(), True),
             T.StructField('dt_procedimento_realizado', T.TimestampType(), True),
-            T.StructField('cd_paciente', T.LongType(), True),
+            T.StructField('cd_paciente', T.StringType(), True),
             T.StructField('nm_paciente', T.StringType(), True),
             T.StructField('obito_fetal_clinico', T.IntegerType(), True),
             T.StructField('termo_detectado', T.StringType(), True)
@@ -214,9 +232,8 @@ if not bronze_pd.empty:
         silver_df = spark.createDataFrame(silver_pd, schema=silver_schema)
         silver_df = silver_df.withColumn(
             'dt_referencia',
-            F.to_timestamp('dt_procedimento_realizado')
+            F.col('dt_procedimento_realizado')
         )
-        silver_df = silver_df.filter(F.col('dt_referencia').isNotNull())
 
         print(f"💾 Gravando {silver_df.count():,} registros na Silver: {SILVER_TABLE}")
         silver_writer = silver_df.write.format("delta").mode(SILVER_WRITE_MODE)
