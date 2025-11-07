@@ -349,7 +349,7 @@ WITH laudos AS (
     FROM vw_laudos_pos
 )
 
-, atendimentos_mãe AS (
+, atendimentos_mae AS (
     SELECT 'HSP' AS fonte, tm.cd_atendimento, tm.cd_paciente, tm.cd_atendimento_mae, tm.dt_atendimento
     FROM RAWZN.RAW_HSP_TM_ATENDIMENTO tm
     UNION ALL
@@ -367,7 +367,7 @@ SELECT
     a.cd_atendimento AS cd_atendimento_mae,
     a.dt_atendimento AS dt_atendimento_mae
 FROM laudos l
-JOIN atendimentos_mãe a
+JOIN atendimentos_mae a
   ON a.cd_paciente = l.cd_paciente_mae
  AND a.dt_atendimento BETWEEN l.dt_referencia - INTERVAL {JANELA_DIAS} DAYS
                            AND l.dt_referencia + INTERVAL {JANELA_DIAS} DAYS
