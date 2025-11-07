@@ -176,79 +176,51 @@ if len(df_bronze_pd) > 0:
     )
 
     df_bronze = spark.createDataFrame(df_bronze_pd)
+    
+    # Criar chave única para evitar duplicatas
+    df_bronze = df_bronze.withColumn(
+        "LAUDO_ID",
+        F.concat(
+            F.col("FONTE"),
+            F.lit("_"),
+            F.col("CD_ATENDIMENTO"),
+            F.lit("_"),
+            F.col("CD_OCORRENCIA"),
+            F.lit("_"),
+            F.col("CD_ORDEM")
+        )
+    )
+    
+    # Remover duplicatas baseado na chave única
+    df_bronze = df_bronze.dropDuplicates(["LAUDO_ID"])
+    
     df_bronze = df_bronze.withColumn("DT_INGESTAO", F.current_timestamp())
 
     print(f"💾 Gravando {df_bronze.count():,} registros na camada Bronze: {BRONZE_TABLE}")
-    df_bronze.write.format("delta").mode(BRONZE_WRITE_MODE).saveAsTable(BRONZE_TABLE)
+    
+    writer = df_bronze.write.format("delta").mode(BRONZE_WRITE_MODE)
+    if BRONZE_WRITE_MODE == "overwrite":
+        writer = writer.option("overwriteSchema", "true")
+    writer.saveAsTable(BRONZE_TABLE)
+    
     spark.catalog.refreshTable(BRONZE_TABLE)
+    
+    # Estatísticas finais
+    total = df_bronze.count()
+    pacientes_unicos = df_bronze.select("CD_PACIENTE").distinct().count()
+    
+    print("=" * 80)
+    print("ESTATÍSTICAS BRONZE")
+    print("=" * 80)
+    print(f"Total de laudos: {total:,}")
+    print(f"Pacientes únicos: {pacientes_unicos:,}")
+    print(f"Por fonte:")
+    df_bronze.groupBy("FONTE").count().show()
+    print("=" * 80)
 else:
     try:
         spark.table(BRONZE_TABLE).limit(0)
         print("ℹ️ Nenhuma atualização aplicada; tabela Bronze permanece inalterada.")
     except AnalysisException:
         print("ℹ️ Tabela Bronze ainda não existe e não há dados para criá-la.")
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## 4. Criar Chave Única e Limpar
-
-# COMMAND ----------
-
-# Criar chave única para evitar duplicatas
-df_spark = df_spark.withColumn(
-    "LAUDO_ID",
-    concat(
-        col("FONTE"),
-        lit("_"),
-        col("CD_ATENDIMENTO"),
-        lit("_"),
-        col("CD_OCORRENCIA"),
-        lit("_"),
-        col("CD_ORDEM")
-    )
-)
-
-# Filtrar laudos vazios
-df_spark = df_spark.filter(
-    length(trim(col("DS_LAUDO_MEDICO"))) > 0
-)
-
-print(f"✅ Laudos válidos após limpeza: {df_spark.count()} registros")
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## 5. Salvar em Delta Lake (Bronze)
-
-# COMMAND ----------
-
-# Salvar em Delta Lake com append (evita duplicatas pela chave)
-df_spark.write \
-    .format("delta") \
-    .mode("append") \
-    .option("mergeSchema", "true") \
-    .saveAsTable(BRONZE_TABLE)
-
-print(f"✅ Dados salvos em {BRONZE_TABLE}")
-print(f"   Total de registros: {df_spark.count()}")
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## 6. Estatísticas
-
-# COMMAND ----------
-
-total = df_spark.count()
-pacientes_unicos = df_spark.select("CD_PACIENTE").distinct().count()
-
-print("=" * 80)
-print("ESTATÍSTICAS BRONZE")
-print("=" * 80)
-print(f"Total de laudos: {total}")
-print(f"Por fonte:")
-df_spark.groupBy("FONTE").count().show()
-print(f"Pacientes únicos: {pacientes_unicos}")
-print("=" * 80)
 
