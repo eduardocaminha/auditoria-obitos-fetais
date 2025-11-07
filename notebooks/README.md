@@ -108,14 +108,15 @@ FONTE 1: Laudos de Ultrassom                FONTE 2: CIDs Diagnósticos
 #### FONTE 1: Laudos Positivos (Silver)
 - Lê laudos positivos da Silver
 - Para cada laudo (paciente = mãe):
-  - Busca atendimentos da mãe (±7 dias)
+  - Busca atendimentos da mãe (±7 dias) via `run_sql`
   - Identifica fetos vinculados (`CD_ATENDIMENTO_MAE`)
   - Gera pares (mãe, feto)
 
-#### FONTE 2: CIDs Diagnósticos
-- Busca direto no Lake diagnósticos com CIDs:
+#### FONTE 2: CIDs Diagnósticos (com Bronze)
+- Busca direto no Lake diagnósticos com CIDs via `run_sql`:
   - **Núcleo:** P95, O36.4, Z37.1, Z37.4, etc (10 CIDs)
   - **Contexto:** O43.1, O69.*, etc (6 CIDs)
+- **Grava em Bronze Delta:** `innovation_dev.bronze.auditoria_obitos_cids`
 - Para cada diagnóstico:
   - Busca atendimentos relacionados (±7 dias)
   - Identifica se é feto (tem `CD_ATENDIMENTO_MAE`) ou mãe
@@ -166,6 +167,7 @@ FONTE 1: Laudos de Ultrassom                FONTE 2: CIDs Diagnósticos
 - `JANELA_DIAS`: janela temporal para buscar vínculos (padrão: 7)
 - `CID10_LIST`: lista de CIDs monitorados (16 códigos)
 - `AUDITORIA_TABLE`: tabela da auditoria oficial
+- `FORCAR_REPROCESSAMENTO_CID`: True para forçar nova extração dos CIDs (padrão: False)
 
 ---
 
@@ -247,6 +249,32 @@ Ajuste `PERIODO_INICIO` e `PERIODO_FIM` em cada notebook
 - openpyxl (instalado automaticamente)
 - Acesso ao datalake (RAWZN)
 - Biblioteca interna: `/Workspace/Libraries/Lake`
+
+---
+
+## 🔧 Notas Técnicas
+
+### Uso de `run_sql` vs `spark.sql`
+
+O notebook `04_gold_analise_subnotificacao.py` utiliza `run_sql` (da biblioteca Lake) ao invés de `spark.sql` para evitar **erros de permissão de catalog** ao fazer JOINs complexos entre tabelas Delta e RAWZN.
+
+**Vantagens:**
+- ✅ Evita `INSUFFICIENT_PRIVILEGES` em queries complexas
+- ✅ Acesso direto ao Lake sem problemas de catalog
+- ✅ Mais controle sobre a execução
+
+**Trade-off:**
+- ⚠️ Processamento iterativo pode ser mais lento em datasets grandes
+- ⚠️ Considere otimizar para produção se volume crescer muito
+
+### Camada Bronze CID
+
+Os CIDs são salvos em Bronze (`innovation_dev.bronze.auditoria_obitos_cids`) para:
+- Evitar reprocessamento desnecessário
+- Permitir auditoria dos dados extraídos
+- Facilitar debugging
+
+Use `FORCAR_REPROCESSAMENTO_CID = True` para forçar nova extração.
 
 ---
 
