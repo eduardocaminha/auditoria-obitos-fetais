@@ -616,7 +616,7 @@ df_consolidado_nomes.createOrReplaceTempView("vw_pares_com_nomes")
 
 # CD_ATENDIMENTO dos laudos
 atendimentos_laudos = set(
-    silver_pd[silver_pd['cd_atendimento'].notna()]['cd_atendimento'].astype(str).values
+    df_laudos_pd[df_laudos_pd['cd_atendimento'].notna()]['cd_atendimento'].astype(str).values
 )
 
 # CD_ATENDIMENTO dos CIDs
@@ -657,7 +657,7 @@ print(f"✅ Total de CD_ATENDIMENTO encontrados na auditoria: {len(atendimentos_
 
 # Marcar atendimentos dos casos detectados que estão na auditoria
 # Laudos
-silver_pd['atendimento_na_auditoria'] = silver_pd['cd_atendimento'].astype(str).apply(
+df_laudos_pd['atendimento_na_auditoria'] = df_laudos_pd['cd_atendimento'].astype(str).apply(
     lambda x: x in atendimentos_na_auditoria
 )
 
@@ -677,7 +677,7 @@ def verificar_auditoria(row):
     
     # Verificar nos laudos
     if 'LAUDO' in origem:
-        laudos_match = silver_pd[silver_pd['cd_paciente'].astype(str) == cd_principal]
+        laudos_match = df_laudos_pd[df_laudos_pd['cd_paciente'].astype(str) == cd_principal]
         if not laudos_match.empty and laudos_match['atendimento_na_auditoria'].any():
             return 'SIM'
     
