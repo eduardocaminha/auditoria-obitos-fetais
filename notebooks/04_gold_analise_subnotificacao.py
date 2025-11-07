@@ -803,17 +803,29 @@ def buscar_ultimo_laudo(cd_paciente):
 # Buscar CIDs
 cids_bronze_pd = df_cids.select('CD_PACIENTE', 'CD_CID10').toPandas()
 
+# Garantir tipos consistentes para comparação
+cids_bronze_pd['CD_PACIENTE'] = cids_bronze_pd['CD_PACIENTE'].astype('Int64')
+
 def buscar_cids(cd_paciente):
     if pd.isna(cd_paciente):
         return None
     
-    cids_paciente = cids_bronze_pd[cids_bronze_pd['CD_PACIENTE'] == cd_paciente]
+    # Converter para Int64 para garantir match
+    try:
+        cd_paciente_int = int(cd_paciente)
+    except (ValueError, TypeError):
+        return None
+    
+    cids_paciente = cids_bronze_pd[cids_bronze_pd['CD_PACIENTE'] == cd_paciente_int]
     if len(cids_paciente) == 0:
         return None
     
     # Retornar lista única de CIDs
     cids_lista = cids_paciente['CD_CID10'].unique().tolist()
     return ", ".join(cids_lista)
+
+print(f"   📊 CIDs disponíveis na Bronze: {len(cids_bronze_pd)} registros")
+print(f"   📊 Pacientes únicos na Bronze CID: {cids_bronze_pd['CD_PACIENTE'].nunique()}")
 
 print("   Buscando laudos das mães...")
 df_enriquecido_pd['laudo_mae'] = df_enriquecido_pd['cd_paciente_principal'].apply(buscar_ultimo_laudo)
@@ -823,6 +835,11 @@ df_enriquecido_pd['cids_mae'] = df_enriquecido_pd['cd_paciente_principal'].apply
 
 print("   Buscando CIDs dos fetos...")
 df_enriquecido_pd['cids_feto'] = df_enriquecido_pd['cd_paciente_feto'].apply(buscar_cids)
+
+# Debug: quantos encontramos
+cids_mae_encontrados = df_enriquecido_pd['cids_mae'].notna().sum()
+cids_feto_encontrados = df_enriquecido_pd['cids_feto'].notna().sum()
+print(f"   ✅ CIDs encontrados: {cids_mae_encontrados} mães, {cids_feto_encontrados} fetos")
 
 # Converter de volta para Spark
 df_com_auditoria = spark.createDataFrame(df_enriquecido_pd)
