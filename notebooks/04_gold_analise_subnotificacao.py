@@ -45,7 +45,11 @@ JANELA_DIAS = 7
 
 # Tabelas
 SILVER_TABLE = "innovation_dev.silver.auditoria_obitos_fetais_processado"
+BRONZE_CID_TABLE = "innovation_dev.bronze.auditoria_obitos_cids"
 AUDITORIA_TABLE = "RAWZN.TB_AUDITORIA_OBITO_ITEM"
+
+# Controle de camadas
+FORCAR_REPROCESSAMENTO_CID = False  # True para forçar nova extração dos CIDs
 
 # CIDs associados a óbito fetal
 CID10_LIST = [
@@ -137,57 +141,113 @@ df_laudos_silver.createOrReplaceTempView("vw_laudos_positivos")
 
 # COMMAND ----------
 
-query_vinculos_laudos = f"""
-WITH LAUDOS AS (
-    SELECT DISTINCT
-        cd_paciente AS cd_paciente_mae,
-        nm_paciente AS nm_mae,
-        dt_procedimento_realizado AS dt_referencia,
-        fonte,
-        cd_atendimento
-    FROM vw_laudos_positivos
-),
-ATENDIMENTOS_MAE AS (
+# Buscar atendimentos e fetos usando pandas + run_sql para evitar problemas de catalog
+df_laudos_pd = df_laudos_silver.select('cd_paciente', 'nm_paciente', 'dt_procedimento_realizado', 'fonte', 'cd_atendimento').distinct().toPandas()
+
+vinculos_laudos_list = []
+
+for _, laudo in df_laudos_pd.iterrows():
+    cd_paciente_mae = laudo['cd_paciente']
+    nm_mae = laudo['nm_paciente']
+    dt_ref = laudo['dt_procedimento_realizado']
+    fonte_laudo = laudo['fonte']
+    cd_atend_laudo = laudo['cd_atendimento']
+    
+    # Calcular janela
+    dt_inicio = (pd.to_datetime(dt_ref) - pd.Timedelta(days=JANELA_DIAS)).strftime('%Y-%m-%d')
+    dt_fim = (pd.to_datetime(dt_ref) + pd.Timedelta(days=JANELA_DIAS)).strftime('%Y-%m-%d')
+    
+    # Buscar atendimentos da mãe na janela
+    query_atend_mae = f"""
     SELECT 'HSP' AS fonte_atend, CD_ATENDIMENTO, CD_PACIENTE, DT_ATENDIMENTO
     FROM RAWZN.RAW_HSP_TM_ATENDIMENTO
+    WHERE CD_PACIENTE = {cd_paciente_mae}
+      AND DT_ATENDIMENTO >= DATE '{dt_inicio}'
+      AND DT_ATENDIMENTO <= DATE '{dt_fim}'
     UNION ALL
     SELECT 'PSC' AS fonte_atend, CD_ATENDIMENTO, CD_PACIENTE, DT_ATENDIMENTO
     FROM RAWZN.RAW_PSC_TM_ATENDIMENTO
-),
-FETOS AS (
-    SELECT 'HSP' AS fonte_feto, CD_ATENDIMENTO AS cd_atendimento_feto, 
-           CD_PACIENTE AS cd_paciente_feto, CD_ATENDIMENTO_MAE, DT_ATENDIMENTO AS dt_atendimento_feto
-    FROM RAWZN.RAW_HSP_TM_ATENDIMENTO
-    WHERE CD_ATENDIMENTO_MAE IS NOT NULL
-    UNION ALL
-    SELECT 'PSC' AS fonte_feto, CD_ATENDIMENTO AS cd_atendimento_feto, 
-           CD_PACIENTE AS cd_paciente_feto, CD_ATENDIMENTO_MAE, DT_ATENDIMENTO AS dt_atendimento_feto
-    FROM RAWZN.RAW_PSC_TM_ATENDIMENTO
-    WHERE CD_ATENDIMENTO_MAE IS NOT NULL
-)
-SELECT
-    L.cd_paciente_mae,
-    L.nm_mae,
-    L.dt_referencia,
-    L.fonte AS fonte_laudo,
-    L.cd_atendimento AS cd_atendimento_laudo,
-    A.CD_ATENDIMENTO AS cd_atendimento_mae,
-    A.DT_ATENDIMENTO AS dt_atendimento_mae,
-    F.fonte_feto,
-    F.cd_atendimento_feto,
-    F.cd_paciente_feto,
-    F.dt_atendimento_feto,
-    'LAUDO' AS origem
-FROM LAUDOS L
-INNER JOIN ATENDIMENTOS_MAE A
-    ON A.CD_PACIENTE = L.cd_paciente_mae
-    AND A.DT_ATENDIMENTO BETWEEN DATE_ADD(L.dt_referencia, -{JANELA_DIAS}) 
-                              AND DATE_ADD(L.dt_referencia, {JANELA_DIAS})
-LEFT JOIN FETOS F
-    ON F.CD_ATENDIMENTO_MAE = A.CD_ATENDIMENTO
-"""
+    WHERE CD_PACIENTE = {cd_paciente_mae}
+      AND DT_ATENDIMENTO >= DATE '{dt_inicio}'
+      AND DT_ATENDIMENTO <= DATE '{dt_fim}'
+    """
+    
+    atend_mae_pd = run_sql(query_atend_mae)
+    
+    if len(atend_mae_pd) > 0:
+        cd_atend_maes = ", ".join(str(x) for x in atend_mae_pd['CD_ATENDIMENTO'].unique())
+        
+        # Buscar fetos vinculados
+        query_fetos = f"""
+        SELECT 'HSP' AS fonte_feto, CD_ATENDIMENTO AS cd_atendimento_feto,
+               CD_PACIENTE AS cd_paciente_feto, CD_ATENDIMENTO_MAE, DT_ATENDIMENTO AS dt_atendimento_feto
+        FROM RAWZN.RAW_HSP_TM_ATENDIMENTO
+        WHERE CD_ATENDIMENTO_MAE IN ({cd_atend_maes})
+        UNION ALL
+        SELECT 'PSC' AS fonte_feto, CD_ATENDIMENTO AS cd_atendimento_feto,
+               CD_PACIENTE AS cd_paciente_feto, CD_ATENDIMENTO_MAE, DT_ATENDIMENTO AS dt_atendimento_feto
+        FROM RAWZN.RAW_PSC_TM_ATENDIMENTO
+        WHERE CD_ATENDIMENTO_MAE IN ({cd_atend_maes})
+        """
+        
+        fetos_pd = run_sql(query_fetos)
+        
+        # Criar vínculos
+        for _, atend in atend_mae_pd.iterrows():
+            fetos_atend = fetos_pd[fetos_pd['CD_ATENDIMENTO_MAE'] == atend['CD_ATENDIMENTO']]
+            
+            if len(fetos_atend) > 0:
+                for _, feto in fetos_atend.iterrows():
+                    vinculos_laudos_list.append({
+                        'cd_paciente_mae': cd_paciente_mae,
+                        'nm_mae': nm_mae,
+                        'dt_referencia': dt_ref,
+                        'fonte_laudo': fonte_laudo,
+                        'cd_atendimento_laudo': cd_atend_laudo,
+                        'cd_atendimento_mae': atend['CD_ATENDIMENTO'],
+                        'dt_atendimento_mae': atend['DT_ATENDIMENTO'],
+                        'fonte_feto': feto['fonte_feto'],
+                        'cd_atendimento_feto': feto['cd_atendimento_feto'],
+                        'cd_paciente_feto': feto['cd_paciente_feto'],
+                        'dt_atendimento_feto': feto['dt_atendimento_feto'],
+                        'origem': 'LAUDO'
+                    })
+            else:
+                # Sem feto vinculado
+                vinculos_laudos_list.append({
+                    'cd_paciente_mae': cd_paciente_mae,
+                    'nm_mae': nm_mae,
+                    'dt_referencia': dt_ref,
+                    'fonte_laudo': fonte_laudo,
+                    'cd_atendimento_laudo': cd_atend_laudo,
+                    'cd_atendimento_mae': atend['CD_ATENDIMENTO'],
+                    'dt_atendimento_mae': atend['DT_ATENDIMENTO'],
+                    'fonte_feto': None,
+                    'cd_atendimento_feto': None,
+                    'cd_paciente_feto': None,
+                    'dt_atendimento_feto': None,
+                    'origem': 'LAUDO'
+                })
 
-df_laudos_vinculos = spark.sql(query_vinculos_laudos)
+if len(vinculos_laudos_list) > 0:
+    df_laudos_vinculos = spark.createDataFrame(pd.DataFrame(vinculos_laudos_list))
+else:
+    # Schema vazio
+    schema = T.StructType([
+        T.StructField('cd_paciente_mae', T.LongType(), True),
+        T.StructField('nm_mae', T.StringType(), True),
+        T.StructField('dt_referencia', T.TimestampType(), True),
+        T.StructField('fonte_laudo', T.StringType(), True),
+        T.StructField('cd_atendimento_laudo', T.StringType(), True),
+        T.StructField('cd_atendimento_mae', T.LongType(), True),
+        T.StructField('dt_atendimento_mae', T.TimestampType(), True),
+        T.StructField('fonte_feto', T.StringType(), True),
+        T.StructField('cd_atendimento_feto', T.LongType(), True),
+        T.StructField('cd_paciente_feto', T.LongType(), True),
+        T.StructField('dt_atendimento_feto', T.TimestampType(), True),
+        T.StructField('origem', T.StringType(), True)
+    ])
+    df_laudos_vinculos = spark.createDataFrame([], schema)
 
 total_vinculos_laudos = df_laudos_vinculos.count()
 com_feto = df_laudos_vinculos.filter(F.col('cd_paciente_feto').isNotNull()).count()
@@ -203,20 +263,32 @@ df_laudos_vinculos.createOrReplaceTempView("vw_laudos_vinculos")
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 5. FONTE 2: Buscar CIDs de Óbito Fetal
+# MAGIC ## 5. FONTE 2: Buscar CIDs de Óbito Fetal (com Bronze)
 
 # COMMAND ----------
 
-cid_sql_list = ", ".join(f"'{cid}'" for cid in CID10_LIST)
+def carregar_cids_bronze():
+    """Tenta carregar CIDs da Bronze. Se não existir ou forçar, extrai do Lake."""
+    if FORCAR_REPROCESSAMENTO_CID:
+        print("⚠️ Forçando reprocessamento dos CIDs")
+        return None
+    
+    try:
+        cids_bronze = spark.table(BRONZE_CID_TABLE)
+        total_bronze = cids_bronze.count()
+        print(f"✅ CIDs carregados da Bronze: {total_bronze:,}")
+        return cids_bronze
+    except AnalysisException:
+        print(f"ℹ️ Tabela Bronze CID {BRONZE_CID_TABLE} não encontrada. Extraindo do Lake...")
+        return None
 
-query_cids = f"""
-SELECT
-    FONTE,
-    CD_ATENDIMENTO,
-    CD_PACIENTE,
-    CD_CID10,
-    DT_REFERENCIA
-FROM (
+df_cids = carregar_cids_bronze()
+
+if df_cids is None:
+    # Extrair do Lake usando run_sql
+    cid_sql_list = ", ".join(f"'{cid}'" for cid in CID10_LIST)
+    
+    query_cids = f"""
     SELECT
         'HSP' AS FONTE,
         CD_ATENDIMENTO,
@@ -242,11 +314,40 @@ FROM (
     WHERE CD_CID10 IN ({cid_sql_list})
       AND COALESCE(DT_DIAGNOSTICO, DT_ATENDIMENTO) >= DATE '{PERIODO_INICIO}'
       AND COALESCE(DT_DIAGNOSTICO, DT_ATENDIMENTO) < DATE '{PERIODO_FIM}'
-) DIAG
-WHERE DIAG.FL_VALIDADO = 'S'
-"""
+    """
+    
+    cids_pd = run_sql(query_cids)
+    
+    # Filtrar validados
+    cids_pd = cids_pd[cids_pd['FL_VALIDADO'] == 'S'].copy()
+    cids_pd = cids_pd.drop(columns=['FL_VALIDADO'])
+    
+    if len(cids_pd) > 0:
+        # Converter tipos
+        cids_pd['DT_REFERENCIA'] = pd.to_datetime(cids_pd['DT_REFERENCIA'])
+        
+        df_cids = spark.createDataFrame(cids_pd)
+        df_cids = df_cids.withColumn("DT_INGESTAO", F.current_timestamp())
+        
+        # Salvar em Bronze
+        print(f"💾 Gravando {len(cids_pd):,} CIDs na Bronze: {BRONZE_CID_TABLE}")
+        df_cids.write.format("delta").mode("overwrite").option("overwriteSchema", "true").saveAsTable(BRONZE_CID_TABLE)
+        spark.catalog.refreshTable(BRONZE_CID_TABLE)
+    else:
+        print("⚠️ Nenhum CID encontrado para o período")
+        df_cids = spark.createDataFrame([], T.StructType([
+            T.StructField('FONTE', T.StringType(), True),
+            T.StructField('CD_ATENDIMENTO', T.LongType(), True),
+            T.StructField('CD_PACIENTE', T.LongType(), True),
+            T.StructField('CD_CID10', T.StringType(), True),
+            T.StructField('DT_REFERENCIA', T.TimestampType(), True)
+        ]))
 
-df_cids = spark.sql(query_cids)
+# Aplicar filtro de período (caso tenha carregado Bronze com período maior)
+df_cids = df_cids.filter(
+    (F.col('DT_REFERENCIA') >= F.lit(PERIODO_INICIO)) &
+    (F.col('DT_REFERENCIA') < F.lit(PERIODO_FIM))
+)
 
 total_cids = df_cids.count()
 print(f"✅ Diagnósticos com CIDs de óbito fetal: {total_cids:,}")
@@ -264,80 +365,80 @@ df_cids.createOrReplaceTempView("vw_cids_obito")
 
 # COMMAND ----------
 
-query_vinculos_cids = f"""
-WITH CIDS AS (
-    SELECT DISTINCT
-        CD_PACIENTE,
-        CD_ATENDIMENTO,
-        FONTE,
-        DT_REFERENCIA,
-        CD_CID10
-    FROM vw_cids_obito
-),
-ATENDIMENTOS AS (
+# Buscar atendimentos e vínculos usando run_sql
+df_cids_pd = df_cids.select('CD_PACIENTE', 'CD_ATENDIMENTO', 'FONTE', 'DT_REFERENCIA', 'CD_CID10').distinct().toPandas()
+
+vinculos_cids_list = []
+
+for _, cid_row in df_cids_pd.iterrows():
+    cd_paciente = cid_row['CD_PACIENTE']
+    cd_atendimento_cid = cid_row['CD_ATENDIMENTO']
+    fonte_cid = cid_row['FONTE']
+    dt_ref = cid_row['DT_REFERENCIA']
+    cd_cid10 = cid_row['CD_CID10']
+    
+    # Calcular janela
+    dt_inicio = (pd.to_datetime(dt_ref) - pd.Timedelta(days=JANELA_DIAS)).strftime('%Y-%m-%d')
+    dt_fim = (pd.to_datetime(dt_ref) + pd.Timedelta(days=JANELA_DIAS)).strftime('%Y-%m-%d')
+    
+    # Buscar atendimentos relacionados na janela
+    query_atend = f"""
     SELECT 'HSP' AS fonte_atend, CD_ATENDIMENTO, CD_PACIENTE, CD_ATENDIMENTO_MAE, DT_ATENDIMENTO
     FROM RAWZN.RAW_HSP_TM_ATENDIMENTO
+    WHERE CD_PACIENTE = {cd_paciente}
+      AND DT_ATENDIMENTO >= DATE '{dt_inicio}'
+      AND DT_ATENDIMENTO <= DATE '{dt_fim}'
     UNION ALL
     SELECT 'PSC' AS fonte_atend, CD_ATENDIMENTO, CD_PACIENTE, CD_ATENDIMENTO_MAE, DT_ATENDIMENTO
     FROM RAWZN.RAW_PSC_TM_ATENDIMENTO
-),
-PACIENTES AS (
-    SELECT 'HSP' AS fonte_pac, CD_PACIENTE, NM_PACIENTE
-    FROM RAWZN.RAW_HSP_TB_PACIENTE
-    UNION ALL
-    SELECT 'PSC' AS fonte_pac, CD_PACIENTE, NM_PACIENTE
-    FROM RAWZN.RAW_PSC_TB_PACIENTE
-),
--- Buscar atendimentos relacionados (±janela)
-ATEND_RELACIONADOS AS (
-    SELECT DISTINCT
-        C.CD_PACIENTE AS cd_paciente_cid,
-        C.CD_ATENDIMENTO AS cd_atendimento_cid,
-        C.FONTE AS fonte_cid,
-        C.DT_REFERENCIA,
-        C.CD_CID10,
-        A.CD_ATENDIMENTO AS cd_atendimento_relacionado,
-        A.CD_PACIENTE AS cd_paciente_relacionado,
-        A.CD_ATENDIMENTO_MAE,
-        A.DT_ATENDIMENTO
-    FROM CIDS C
-    INNER JOIN ATENDIMENTOS A
-        ON A.CD_PACIENTE = C.CD_PACIENTE
-        AND A.DT_ATENDIMENTO BETWEEN DATE_ADD(C.DT_REFERENCIA, -{JANELA_DIAS}) 
-                                  AND DATE_ADD(C.DT_REFERENCIA, {JANELA_DIAS})
-)
--- Identificar papel: é feto (tem CD_ATENDIMENTO_MAE) ou mãe?
-SELECT
-    AR.cd_paciente_cid,
-    AR.cd_atendimento_cid,
-    AR.fonte_cid,
-    AR.DT_REFERENCIA,
-    AR.CD_CID10,
-    CASE 
-        WHEN AR.CD_ATENDIMENTO_MAE IS NOT NULL THEN 'FETO'
-        ELSE 'MAE'
-    END AS papel,
-    CASE
-        WHEN AR.CD_ATENDIMENTO_MAE IS NOT NULL THEN AR.CD_ATENDIMENTO_MAE
-        ELSE AR.cd_atendimento_relacionado
-    END AS cd_atendimento_mae,
-    CASE
-        WHEN AR.CD_ATENDIMENTO_MAE IS NOT NULL THEN NULL
-        ELSE AR.cd_paciente_relacionado
-    END AS cd_paciente_mae,
-    CASE
-        WHEN AR.CD_ATENDIMENTO_MAE IS NOT NULL THEN AR.cd_atendimento_relacionado
-        ELSE NULL
-    END AS cd_atendimento_feto,
-    CASE
-        WHEN AR.CD_ATENDIMENTO_MAE IS NOT NULL THEN AR.cd_paciente_relacionado
-        ELSE NULL
-    END AS cd_paciente_feto,
-    'CID' AS origem
-FROM ATEND_RELACIONADOS AR
-"""
+    WHERE CD_PACIENTE = {cd_paciente}
+      AND DT_ATENDIMENTO >= DATE '{dt_inicio}'
+      AND DT_ATENDIMENTO <= DATE '{dt_fim}'
+    """
+    
+    atend_pd = run_sql(query_atend)
+    
+    if len(atend_pd) > 0:
+        for _, atend in atend_pd.iterrows():
+            # Identificar papel: é feto (tem CD_ATENDIMENTO_MAE) ou mãe?
+            cd_atendimento_mae_col = atend['CD_ATENDIMENTO_MAE']
+            
+            if pd.notna(cd_atendimento_mae_col):
+                # É FETO
+                vinculos_cids_list.append({
+                    'cd_paciente_mae': None,
+                    'cd_atendimento_mae': int(cd_atendimento_mae_col),
+                    'cd_paciente_feto': cd_paciente,
+                    'cd_atendimento_feto': atend['CD_ATENDIMENTO'],
+                    'papel': 'FETO',
+                    'cd_cid10': cd_cid10,
+                    'origem': 'CID'
+                })
+            else:
+                # É MÃE
+                vinculos_cids_list.append({
+                    'cd_paciente_mae': cd_paciente,
+                    'cd_atendimento_mae': atend['CD_ATENDIMENTO'],
+                    'cd_paciente_feto': None,
+                    'cd_atendimento_feto': None,
+                    'papel': 'MAE',
+                    'cd_cid10': cd_cid10,
+                    'origem': 'CID'
+                })
 
-df_cids_vinculos = spark.sql(query_vinculos_cids)
+if len(vinculos_cids_list) > 0:
+    df_cids_vinculos = spark.createDataFrame(pd.DataFrame(vinculos_cids_list))
+else:
+    schema = T.StructType([
+        T.StructField('cd_paciente_mae', T.LongType(), True),
+        T.StructField('cd_atendimento_mae', T.LongType(), True),
+        T.StructField('cd_paciente_feto', T.LongType(), True),
+        T.StructField('cd_atendimento_feto', T.LongType(), True),
+        T.StructField('papel', T.StringType(), True),
+        T.StructField('cd_cid10', T.StringType(), True),
+        T.StructField('origem', T.StringType(), True)
+    ])
+    df_cids_vinculos = spark.createDataFrame([], schema)
 
 total_vinculos_cids = df_cids_vinculos.count()
 print(f"📊 Vínculos identificados nos CIDs:")
@@ -418,28 +519,36 @@ df_consolidado.createOrReplaceTempView("vw_pares_consolidados")
 
 # COMMAND ----------
 
-query_nomes = """
-WITH PACIENTES AS (
-    SELECT 'HSP' AS fonte, CD_PACIENTE, NM_PACIENTE
-    FROM RAWZN.RAW_HSP_TB_PACIENTE
-    UNION ALL
-    SELECT 'PSC' AS fonte, CD_PACIENTE, NM_PACIENTE
-    FROM RAWZN.RAW_PSC_TB_PACIENTE
-)
-SELECT
-    PC.cd_paciente_mae,
-    PC.cd_atendimento_mae,
-    PC.cd_paciente_feto,
-    PC.cd_atendimento_feto,
-    COALESCE(PC.nm_mae, P.NM_PACIENTE) AS nm_mae,
-    PC.origem_deteccao
-FROM vw_pares_consolidados PC
-LEFT JOIN PACIENTES P
-    ON P.CD_PACIENTE = PC.cd_paciente_mae
-    AND PC.nm_mae IS NULL
-"""
+# Buscar nomes das mães que estão faltando
+df_consolidado_pd = df_consolidado.toPandas()
 
-df_consolidado_nomes = spark.sql(query_nomes)
+# Identificar mães sem nome
+maes_sem_nome = df_consolidado_pd[df_consolidado_pd['nm_mae'].isna()]['cd_paciente_mae'].unique()
+
+if len(maes_sem_nome) > 0:
+    maes_csv = ", ".join(str(int(x)) for x in maes_sem_nome if pd.notna(x))
+    
+    if maes_csv:
+        query_nomes = f"""
+        SELECT CD_PACIENTE, NM_PACIENTE
+        FROM RAWZN.RAW_HSP_TB_PACIENTE
+        WHERE CD_PACIENTE IN ({maes_csv})
+        UNION ALL
+        SELECT CD_PACIENTE, NM_PACIENTE
+        FROM RAWZN.RAW_PSC_TB_PACIENTE
+        WHERE CD_PACIENTE IN ({maes_csv})
+        """
+        
+        nomes_pd = run_sql(query_nomes)
+        
+        # Mapear nomes
+        nomes_map = dict(zip(nomes_pd['CD_PACIENTE'], nomes_pd['NM_PACIENTE']))
+        df_consolidado_pd['nm_mae'] = df_consolidado_pd.apply(
+            lambda row: nomes_map.get(row['cd_paciente_mae'], row['nm_mae']) if pd.isna(row['nm_mae']) else row['nm_mae'],
+            axis=1
+        )
+
+df_consolidado_nomes = spark.createDataFrame(df_consolidado_pd)
 
 print("✅ Nomes das mães complementados")
 
@@ -452,34 +561,32 @@ df_consolidado_nomes.createOrReplaceTempView("vw_pares_com_nomes")
 
 # COMMAND ----------
 
-query_auditoria = f"""
-SELECT
-    PC.cd_paciente_mae,
-    PC.nm_mae,
-    PC.cd_atendimento_mae,
-    PC.cd_paciente_feto,
-    PC.cd_atendimento_feto,
-    PC.origem_deteccao,
-    CASE 
-        WHEN AUD_MAE.CD_PACIENTE IS NOT NULL THEN 'SIM'
-        ELSE 'NAO'
-    END AS mae_na_auditoria,
-    CASE 
-        WHEN AUD_FETO.CD_PACIENTE IS NOT NULL THEN 'SIM'
-        ELSE 'NAO'
-    END AS feto_na_auditoria,
-    CASE
-        WHEN AUD_MAE.CD_PACIENTE IS NOT NULL OR AUD_FETO.CD_PACIENTE IS NOT NULL THEN 'SIM'
-        ELSE 'NAO'
-    END AS na_auditoria
-FROM vw_pares_com_nomes PC
-LEFT JOIN {AUDITORIA_TABLE} AUD_MAE
-    ON AUD_MAE.CD_PACIENTE = PC.cd_paciente_mae
-LEFT JOIN {AUDITORIA_TABLE} AUD_FETO
-    ON AUD_FETO.CD_PACIENTE = PC.cd_paciente_feto
+# Buscar lista de pacientes na auditoria
+query_auditoria_maes = """
+SELECT DISTINCT CD_PACIENTE
+FROM RAWZN.TB_AUDITORIA_OBITO_ITEM
 """
 
-df_com_auditoria = spark.sql(query_auditoria)
+auditoria_pd = run_sql(query_auditoria_maes)
+pacientes_auditados = set(auditoria_pd['CD_PACIENTE'].values)
+
+# Marcar quem está na auditoria
+df_consolidado_nomes_pd = df_consolidado_nomes.toPandas()
+
+df_consolidado_nomes_pd['mae_na_auditoria'] = df_consolidado_nomes_pd['cd_paciente_mae'].apply(
+    lambda x: 'SIM' if pd.notna(x) and int(x) in pacientes_auditados else 'NAO'
+)
+
+df_consolidado_nomes_pd['feto_na_auditoria'] = df_consolidado_nomes_pd['cd_paciente_feto'].apply(
+    lambda x: 'SIM' if pd.notna(x) and int(x) in pacientes_auditados else 'NAO'
+)
+
+df_consolidado_nomes_pd['na_auditoria'] = df_consolidado_nomes_pd.apply(
+    lambda row: 'SIM' if row['mae_na_auditoria'] == 'SIM' or row['feto_na_auditoria'] == 'SIM' else 'NAO',
+    axis=1
+)
+
+df_com_auditoria = spark.createDataFrame(df_consolidado_nomes_pd)
 
 total_na_auditoria = df_com_auditoria.filter(F.col('na_auditoria') == 'SIM').count()
 total_nao_auditados = df_com_auditoria.filter(F.col('na_auditoria') == 'NAO').count()
