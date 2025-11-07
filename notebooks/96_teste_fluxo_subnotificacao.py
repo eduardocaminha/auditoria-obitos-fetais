@@ -24,8 +24,8 @@ import re
 # COMMAND ----------
 
 # Período analisado (ajuste conforme necessário)
-PERIODO_INICIO = '2024-01-01'
-PERIODO_FIM = '2024-01-31'
+PERIODO_INICIO = '2025-10-01'
+PERIODO_FIM = '2025-11-01'
 
 # Janela temporal (± em dias) para buscar outros atendimentos da mãe
 JANELA_DIAS = 7
