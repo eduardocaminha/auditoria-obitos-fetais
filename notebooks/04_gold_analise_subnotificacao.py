@@ -779,7 +779,7 @@ df_enriquecido_pd = df_com_auditoria.toPandas()
 
 # Buscar laudos (apenas o mais recente para cada mãe)
 laudos_silver_pd = df_laudos_silver.select(
-    'cd_paciente', 'dt_procedimento_realizado', 'laudo', 'termo_detectado'
+    'cd_paciente', 'dt_procedimento_realizado', 'texto_original', 'termo_detectado'
 ).toPandas()
 
 # Para cada paciente principal, buscar o laudo mais recente
@@ -793,7 +793,7 @@ def buscar_ultimo_laudo(cd_paciente):
     
     # Ordenar por data e pegar o mais recente
     laudos_paciente = laudos_paciente.sort_values('dt_procedimento_realizado', ascending=False)
-    laudo_recente = laudos_paciente.iloc[0]['laudo']
+    laudo_recente = laudos_paciente.iloc[0]['texto_original']
     
     # Limitar tamanho do laudo para não quebrar Excel
     if laudo_recente and len(str(laudo_recente)) > 500:
