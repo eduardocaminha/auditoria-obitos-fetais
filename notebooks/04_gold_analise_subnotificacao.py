@@ -364,6 +364,23 @@ for idx, cid_row in df_cids_pd.iterrows():
     dt_ref = cid_row['DT_REFERENCIA']
     cd_cid10 = cid_row['CD_CID10']
     
+    # Buscar nome do paciente
+    query_nome_paciente = f"""
+    SELECT NM_PACIENTE
+    FROM RAWZN.RAW_HSP_TB_PACIENTE
+    WHERE CD_PACIENTE = {cd_paciente}
+    UNION ALL
+    SELECT NM_PACIENTE
+    FROM RAWZN.RAW_PSC_TB_PACIENTE
+    WHERE CD_PACIENTE = {cd_paciente}
+    """
+    
+    try:
+        nome_result = run_sql(query_nome_paciente)
+        nm_paciente = nome_result['NM_PACIENTE'].iloc[0] if len(nome_result) > 0 else None
+    except:
+        nm_paciente = None
+    
     # 1. Buscar o atendimento específico do CID para ver se tem CD_ATENDIMENTO_MAE
     query_atend_cid = f"""
     SELECT CD_ATENDIMENTO, CD_PACIENTE, CD_ATENDIMENTO_MAE
@@ -424,7 +441,7 @@ for idx, cid_row in df_cids_pd.iterrows():
                     for _, feto in fetos_pd.iterrows():
                         vinculos_cids_list.append({
                             'cd_paciente_principal': cd_paciente,
-                            'nm_paciente_principal': None,  # buscar depois
+                            'nm_paciente_principal': nm_paciente,
                             'cd_paciente_feto': int(feto['CD_PACIENTE']),
                             'tem_feto_vinculado': 'SIM',
                             'origem': 'CID'
@@ -433,7 +450,7 @@ for idx, cid_row in df_cids_pd.iterrows():
                     # Não tem fetos vinculados
                     vinculos_cids_list.append({
                         'cd_paciente_principal': cd_paciente,
-                        'nm_paciente_principal': None,
+                        'nm_paciente_principal': nm_paciente,
                         'cd_paciente_feto': None,
                         'tem_feto_vinculado': 'NAO',
                         'origem': 'CID'
@@ -445,11 +462,11 @@ for idx, cid_row in df_cids_pd.iterrows():
             
             # Buscar CD_PACIENTE da mãe através do CD_ATENDIMENTO_MAE
             query_mae = f"""
-            SELECT CD_ATENDIMENTO, CD_PACIENTE
+            SELECT CD_ATENDIMENTO, CD_PACIENTE, NM_PACIENTE
             FROM RAWZN.RAW_HSP_TM_ATENDIMENTO
             WHERE CD_ATENDIMENTO = {cd_atendimento_mae}
             UNION ALL
-            SELECT CD_ATENDIMENTO, CD_PACIENTE
+            SELECT CD_ATENDIMENTO, CD_PACIENTE, NM_PACIENTE
             FROM RAWZN.RAW_PSC_TM_ATENDIMENTO
             WHERE CD_ATENDIMENTO = {cd_atendimento_mae}
             """
@@ -458,10 +475,11 @@ for idx, cid_row in df_cids_pd.iterrows():
             
             if len(mae_pd) > 0:
                 cd_paciente_mae = int(mae_pd.iloc[0]['CD_PACIENTE'])
+                nm_paciente_mae = mae_pd.iloc[0]['NM_PACIENTE'] if 'NM_PACIENTE' in mae_pd.columns else None
                 
                 vinculos_cids_list.append({
                     'cd_paciente_principal': cd_paciente_mae,
-                    'nm_paciente_principal': None,  # buscar depois
+                    'nm_paciente_principal': nm_paciente_mae,
                     'cd_paciente_feto': cd_paciente,
                     'tem_feto_vinculado': 'SIM',
                     'origem': 'CID'
@@ -552,6 +570,9 @@ if len(pacientes_sem_nome) > 0:
     pacientes_csv = ", ".join(str(int(x)) for x in pacientes_sem_nome if pd.notna(x))
     
     if pacientes_csv:
+        print(f"🔍 Buscando nomes de {len(pacientes_sem_nome)} pacientes principais...")
+        
+        # Tentar primeiro em TB_PACIENTE
         query_nomes = f"""
         SELECT CD_PACIENTE, NM_PACIENTE
         FROM RAWZN.RAW_HSP_TB_PACIENTE
@@ -562,15 +583,50 @@ if len(pacientes_sem_nome) > 0:
         WHERE CD_PACIENTE IN ({pacientes_csv})
         """
         
-        nomes_pd = run_sql(query_nomes)
+        try:
+            nomes_pd = run_sql(query_nomes)
+            nomes_map = dict(zip(nomes_pd['CD_PACIENTE'], nomes_pd['NM_PACIENTE']))
+            print(f"   ✅ {len(nomes_map)} nomes encontrados em TB_PACIENTE")
+        except Exception as e:
+            print(f"   ⚠️  Erro ao buscar em TB_PACIENTE: {e}")
+            nomes_map = {}
+        
+        # Fallback: buscar em TM_ATENDIMENTO os que não foram encontrados
+        ainda_sem_nome = [int(x) for x in pacientes_sem_nome if pd.notna(x) and x not in nomes_map]
+        
+        if ainda_sem_nome:
+            print(f"🔍 Buscando {len(ainda_sem_nome)} nomes em TM_ATENDIMENTO (fallback)...")
+            ainda_sem_nome_csv = ", ".join(str(x) for x in ainda_sem_nome)
+            
+            query_nomes_atend = f"""
+            SELECT DISTINCT CD_PACIENTE, NM_PACIENTE
+            FROM RAWZN.RAW_HSP_TM_ATENDIMENTO
+            WHERE CD_PACIENTE IN ({ainda_sem_nome_csv})
+            UNION ALL
+            SELECT DISTINCT CD_PACIENTE, NM_PACIENTE
+            FROM RAWZN.RAW_PSC_TM_ATENDIMENTO
+            WHERE CD_PACIENTE IN ({ainda_sem_nome_csv})
+            """
+            
+            try:
+                nomes_atend_pd = run_sql(query_nomes_atend)
+                nomes_atend_map = dict(zip(nomes_atend_pd['CD_PACIENTE'], nomes_atend_pd['NM_PACIENTE']))
+                nomes_map.update(nomes_atend_map)
+                print(f"   ✅ +{len(nomes_atend_map)} nomes encontrados em TM_ATENDIMENTO")
+            except Exception as e:
+                print(f"   ⚠️  Erro ao buscar em TM_ATENDIMENTO: {e}")
         
         # Mapear nomes dos pacientes principais
-        nomes_map = dict(zip(nomes_pd['CD_PACIENTE'], nomes_pd['NM_PACIENTE']))
         df_consolidado_pd['nm_paciente_principal'] = df_consolidado_pd.apply(
             lambda row: nomes_map.get(row['cd_paciente_principal'], row['nm_paciente_principal']) 
                         if pd.isna(row['nm_paciente_principal']) else row['nm_paciente_principal'],
             axis=1
         )
+        
+        # Verificar quantos ainda estão sem nome
+        ainda_vazios = df_consolidado_pd['nm_paciente_principal'].isna().sum()
+        if ainda_vazios > 0:
+            print(f"   ⚠️  {ainda_vazios} pacientes principais ainda sem nome após busca")
 
 # Buscar nomes dos fetos
 fetos_com_cd = df_consolidado_pd[df_consolidado_pd['cd_paciente_feto'].notna()]['cd_paciente_feto'].unique()
@@ -578,6 +634,9 @@ fetos_com_cd = df_consolidado_pd[df_consolidado_pd['cd_paciente_feto'].notna()][
 if len(fetos_com_cd) > 0:
     fetos_csv = ", ".join(str(int(x)) for x in fetos_com_cd)
     
+    print(f"🔍 Buscando nomes de {len(fetos_com_cd)} fetos...")
+    
+    # Tentar primeiro em TB_PACIENTE
     query_nomes_fetos = f"""
     SELECT CD_PACIENTE, NM_PACIENTE
     FROM RAWZN.RAW_HSP_TB_PACIENTE
@@ -588,13 +647,48 @@ if len(fetos_com_cd) > 0:
     WHERE CD_PACIENTE IN ({fetos_csv})
     """
     
-    nomes_fetos_pd = run_sql(query_nomes_fetos)
+    try:
+        nomes_fetos_pd = run_sql(query_nomes_fetos)
+        nomes_fetos_map = dict(zip(nomes_fetos_pd['CD_PACIENTE'], nomes_fetos_pd['NM_PACIENTE']))
+        print(f"   ✅ {len(nomes_fetos_map)} nomes de fetos encontrados em TB_PACIENTE")
+    except Exception as e:
+        print(f"   ⚠️  Erro ao buscar em TB_PACIENTE: {e}")
+        nomes_fetos_map = {}
+    
+    # Fallback: buscar em TM_ATENDIMENTO os que não foram encontrados
+    fetos_ainda_sem_nome = [int(x) for x in fetos_com_cd if x not in nomes_fetos_map]
+    
+    if fetos_ainda_sem_nome:
+        print(f"🔍 Buscando {len(fetos_ainda_sem_nome)} nomes de fetos em TM_ATENDIMENTO (fallback)...")
+        fetos_ainda_csv = ", ".join(str(x) for x in fetos_ainda_sem_nome)
+        
+        query_nomes_fetos_atend = f"""
+        SELECT DISTINCT CD_PACIENTE, NM_PACIENTE
+        FROM RAWZN.RAW_HSP_TM_ATENDIMENTO
+        WHERE CD_PACIENTE IN ({fetos_ainda_csv})
+        UNION ALL
+        SELECT DISTINCT CD_PACIENTE, NM_PACIENTE
+        FROM RAWZN.RAW_PSC_TM_ATENDIMENTO
+        WHERE CD_PACIENTE IN ({fetos_ainda_csv})
+        """
+        
+        try:
+            nomes_fetos_atend_pd = run_sql(query_nomes_fetos_atend)
+            nomes_fetos_atend_map = dict(zip(nomes_fetos_atend_pd['CD_PACIENTE'], nomes_fetos_atend_pd['NM_PACIENTE']))
+            nomes_fetos_map.update(nomes_fetos_atend_map)
+            print(f"   ✅ +{len(nomes_fetos_atend_map)} nomes de fetos encontrados em TM_ATENDIMENTO")
+        except Exception as e:
+            print(f"   ⚠️  Erro ao buscar em TM_ATENDIMENTO: {e}")
     
     # Mapear nomes dos fetos
-    nomes_fetos_map = dict(zip(nomes_fetos_pd['CD_PACIENTE'], nomes_fetos_pd['NM_PACIENTE']))
     df_consolidado_pd['nm_paciente_feto'] = df_consolidado_pd['cd_paciente_feto'].apply(
         lambda x: nomes_fetos_map.get(int(x)) if pd.notna(x) else None
     )
+    
+    # Verificar quantos fetos ainda estão sem nome
+    fetos_vazios = df_consolidado_pd[df_consolidado_pd['cd_paciente_feto'].notna()]['nm_paciente_feto'].isna().sum()
+    if fetos_vazios > 0:
+        print(f"   ⚠️  {fetos_vazios} fetos ainda sem nome após busca")
 else:
     df_consolidado_pd['nm_paciente_feto'] = None
 
