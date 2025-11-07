@@ -141,31 +141,35 @@ df_laudos_silver.createOrReplaceTempView("vw_laudos_positivos")
 
 # COMMAND ----------
 
-# Buscar atendimentos e fetos usando pandas + run_sql para evitar problemas de catalog
-df_laudos_pd = df_laudos_silver.select('cd_paciente', 'nm_paciente', 'dt_procedimento_realizado', 'fonte', 'cd_atendimento').distinct().toPandas()
+print("🔍 Processando vínculos dos LAUDOS...")
+
+df_laudos_pd = df_laudos_silver.select(
+    'cd_paciente', 'nm_paciente', 'dt_procedimento_realizado', 'fonte', 'cd_atendimento'
+).distinct().toPandas()
 
 vinculos_laudos_list = []
 
-for _, laudo in df_laudos_pd.iterrows():
+for idx, laudo in df_laudos_pd.iterrows():
+    if idx % 10 == 0:
+        print(f"   Processando laudo {idx+1}/{len(df_laudos_pd)}...")
+    
     cd_paciente_mae = laudo['cd_paciente']
     nm_mae = laudo['nm_paciente']
     dt_ref = laudo['dt_procedimento_realizado']
-    fonte_laudo = laudo['fonte']
-    cd_atend_laudo = laudo['cd_atendimento']
     
-    # Calcular janela
+    # Calcular janela ±7 dias
     dt_inicio = (pd.to_datetime(dt_ref) - pd.Timedelta(days=JANELA_DIAS)).strftime('%Y-%m-%d')
     dt_fim = (pd.to_datetime(dt_ref) + pd.Timedelta(days=JANELA_DIAS)).strftime('%Y-%m-%d')
     
-    # Buscar atendimentos da mãe na janela
+    # 1. Buscar TODOS os atendimentos da mãe na janela (Lake)
     query_atend_mae = f"""
-    SELECT 'HSP' AS FONTE_ATEND, CD_ATENDIMENTO, CD_PACIENTE, DT_ATENDIMENTO
+    SELECT CD_ATENDIMENTO, CD_PACIENTE, DT_ATENDIMENTO
     FROM RAWZN.RAW_HSP_TM_ATENDIMENTO
     WHERE CD_PACIENTE = {cd_paciente_mae}
       AND DT_ATENDIMENTO >= DATE '{dt_inicio}'
       AND DT_ATENDIMENTO <= DATE '{dt_fim}'
     UNION ALL
-    SELECT 'PSC' AS FONTE_ATEND, CD_ATENDIMENTO, CD_PACIENTE, DT_ATENDIMENTO
+    SELECT CD_ATENDIMENTO, CD_PACIENTE, DT_ATENDIMENTO
     FROM RAWZN.RAW_PSC_TM_ATENDIMENTO
     WHERE CD_PACIENTE = {cd_paciente_mae}
       AND DT_ATENDIMENTO >= DATE '{dt_inicio}'
@@ -175,76 +179,49 @@ for _, laudo in df_laudos_pd.iterrows():
     atend_mae_pd = run_sql(query_atend_mae)
     
     if len(atend_mae_pd) > 0:
-        cd_atend_maes = ", ".join(str(x) for x in atend_mae_pd['CD_ATENDIMENTO'].unique())
+        cd_atend_maes = ", ".join(str(int(x)) for x in atend_mae_pd['CD_ATENDIMENTO'].unique())
         
-        # Buscar fetos vinculados
+        # 2. Buscar fetos vinculados a esses atendimentos (CD_ATENDIMENTO_MAE)
         query_fetos = f"""
-        SELECT 'HSP' AS FONTE_FETO, CD_ATENDIMENTO AS CD_ATENDIMENTO_FETO,
-               CD_PACIENTE AS CD_PACIENTE_FETO, CD_ATENDIMENTO_MAE, DT_ATENDIMENTO AS DT_ATENDIMENTO_FETO
+        SELECT CD_ATENDIMENTO, CD_PACIENTE, CD_ATENDIMENTO_MAE, DT_ATENDIMENTO
         FROM RAWZN.RAW_HSP_TM_ATENDIMENTO
         WHERE CD_ATENDIMENTO_MAE IN ({cd_atend_maes})
         UNION ALL
-        SELECT 'PSC' AS FONTE_FETO, CD_ATENDIMENTO AS CD_ATENDIMENTO_FETO,
-               CD_PACIENTE AS CD_PACIENTE_FETO, CD_ATENDIMENTO_MAE, DT_ATENDIMENTO AS DT_ATENDIMENTO_FETO
+        SELECT CD_ATENDIMENTO, CD_PACIENTE, CD_ATENDIMENTO_MAE, DT_ATENDIMENTO
         FROM RAWZN.RAW_PSC_TM_ATENDIMENTO
         WHERE CD_ATENDIMENTO_MAE IN ({cd_atend_maes})
         """
         
         fetos_pd = run_sql(query_fetos)
         
-        # Criar vínculos
-        for _, atend in atend_mae_pd.iterrows():
-            fetos_atend = fetos_pd[fetos_pd['CD_ATENDIMENTO_MAE'] == atend['CD_ATENDIMENTO']]
-            
-            if len(fetos_atend) > 0:
-                for _, feto in fetos_atend.iterrows():
-                    vinculos_laudos_list.append({
-                        'cd_paciente_mae': cd_paciente_mae,
-                        'nm_mae': nm_mae,
-                        'dt_referencia': dt_ref,
-                        'fonte_laudo': fonte_laudo,
-                        'cd_atendimento_laudo': cd_atend_laudo,
-                        'cd_atendimento_mae': atend['CD_ATENDIMENTO'],
-                        'dt_atendimento_mae': atend['DT_ATENDIMENTO'],
-                        'fonte_feto': feto['FONTE_FETO'],
-                        'cd_atendimento_feto': feto['CD_ATENDIMENTO_FETO'],
-                        'cd_paciente_feto': feto['CD_PACIENTE_FETO'],
-                        'dt_atendimento_feto': feto['DT_ATENDIMENTO_FETO'],
-                        'origem': 'LAUDO'
-                    })
-            else:
-                # Sem feto vinculado
+        if len(fetos_pd) > 0:
+            # Tem fetos vinculados
+            for _, feto in fetos_pd.iterrows():
                 vinculos_laudos_list.append({
-                    'cd_paciente_mae': cd_paciente_mae,
-                    'nm_mae': nm_mae,
-                    'dt_referencia': dt_ref,
-                    'fonte_laudo': fonte_laudo,
-                    'cd_atendimento_laudo': cd_atend_laudo,
-                    'cd_atendimento_mae': atend['CD_ATENDIMENTO'],
-                    'dt_atendimento_mae': atend['DT_ATENDIMENTO'],
-                    'fonte_feto': None,
-                    'cd_atendimento_feto': None,
-                    'cd_paciente_feto': None,
-                    'dt_atendimento_feto': None,
+                    'cd_paciente_principal': cd_paciente_mae,
+                    'nm_paciente_principal': nm_mae,
+                    'cd_paciente_feto': int(feto['CD_PACIENTE']),
+                    'tem_feto_vinculado': 'SIM',
                     'origem': 'LAUDO'
                 })
+        else:
+            # Não tem fetos vinculados (possível subnotificação)
+            vinculos_laudos_list.append({
+                'cd_paciente_principal': cd_paciente_mae,
+                'nm_paciente_principal': nm_mae,
+                'cd_paciente_feto': None,
+                'tem_feto_vinculado': 'NAO',
+                'origem': 'LAUDO'
+            })
 
 if len(vinculos_laudos_list) > 0:
     df_laudos_vinculos = spark.createDataFrame(pd.DataFrame(vinculos_laudos_list))
 else:
-    # Schema vazio
     schema = T.StructType([
-        T.StructField('cd_paciente_mae', T.LongType(), True),
-        T.StructField('nm_mae', T.StringType(), True),
-        T.StructField('dt_referencia', T.TimestampType(), True),
-        T.StructField('fonte_laudo', T.StringType(), True),
-        T.StructField('cd_atendimento_laudo', T.StringType(), True),
-        T.StructField('cd_atendimento_mae', T.LongType(), True),
-        T.StructField('dt_atendimento_mae', T.TimestampType(), True),
-        T.StructField('fonte_feto', T.StringType(), True),
-        T.StructField('cd_atendimento_feto', T.LongType(), True),
+        T.StructField('cd_paciente_principal', T.LongType(), True),
+        T.StructField('nm_paciente_principal', T.StringType(), True),
         T.StructField('cd_paciente_feto', T.LongType(), True),
-        T.StructField('dt_atendimento_feto', T.TimestampType(), True),
+        T.StructField('tem_feto_vinculado', T.StringType(), True),
         T.StructField('origem', T.StringType(), True)
     ])
     df_laudos_vinculos = spark.createDataFrame([], schema)
@@ -253,10 +230,13 @@ total_vinculos_laudos = df_laudos_vinculos.count()
 com_feto = df_laudos_vinculos.filter(F.col('cd_paciente_feto').isNotNull()).count()
 sem_feto = total_vinculos_laudos - com_feto
 
-print(f"📊 Vínculos identificados nos LAUDOS:")
-print(f"   Total de registros: {total_vinculos_laudos:,}")
-print(f"   Com feto vinculado: {com_feto:,}")
-print(f"   Sem feto vinculado: {sem_feto:,}")
+print("=" * 80)
+print("LAUDOS - VÍNCULOS IDENTIFICADOS")
+print("=" * 80)
+print(f"Total de casos: {total_vinculos_laudos:,}")
+print(f"Com feto vinculado: {com_feto:,}")
+print(f"Sem feto vinculado: {sem_feto:,}")
+print("=" * 80)
 
 df_laudos_vinculos.createOrReplaceTempView("vw_laudos_vinculos")
 
@@ -361,68 +341,125 @@ df_cids.createOrReplaceTempView("vw_cids_obito")
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 6. FONTE 2: Vincular Mães e Fetos dos CIDs
+# MAGIC ## 6. FONTE 2: Vincular Pacientes com CID e seus Fetos
 
 # COMMAND ----------
 
-# Buscar atendimentos e vínculos usando run_sql
-df_cids_pd = df_cids.select('CD_PACIENTE', 'CD_ATENDIMENTO', 'FONTE', 'DT_REFERENCIA', 'CD_CID10').distinct().toPandas()
+print("🔍 Processando vínculos dos CIDs...")
+
+df_cids_pd = df_cids.select('CD_PACIENTE', 'CD_ATENDIMENTO', 'DT_REFERENCIA', 'CD_CID10').distinct().toPandas()
 
 vinculos_cids_list = []
 
-for _, cid_row in df_cids_pd.iterrows():
-    cd_paciente = cid_row['CD_PACIENTE']
-    cd_atendimento_cid = cid_row['CD_ATENDIMENTO']
-    fonte_cid = cid_row['FONTE']
+for idx, cid_row in df_cids_pd.iterrows():
+    if idx % 10 == 0:
+        print(f"   Processando CID {idx+1}/{len(df_cids_pd)}...")
+    
+    cd_paciente = int(cid_row['CD_PACIENTE'])
+    cd_atendimento_cid = int(cid_row['CD_ATENDIMENTO'])
     dt_ref = cid_row['DT_REFERENCIA']
     cd_cid10 = cid_row['CD_CID10']
     
-    # Calcular janela
-    dt_inicio = (pd.to_datetime(dt_ref) - pd.Timedelta(days=JANELA_DIAS)).strftime('%Y-%m-%d')
-    dt_fim = (pd.to_datetime(dt_ref) + pd.Timedelta(days=JANELA_DIAS)).strftime('%Y-%m-%d')
-    
-    # Buscar atendimentos relacionados na janela
-    query_atend = f"""
-    SELECT 'HSP' AS FONTE_ATEND, CD_ATENDIMENTO, CD_PACIENTE, CD_ATENDIMENTO_MAE, DT_ATENDIMENTO
+    # 1. Buscar o atendimento específico do CID para ver se tem CD_ATENDIMENTO_MAE
+    query_atend_cid = f"""
+    SELECT CD_ATENDIMENTO, CD_PACIENTE, CD_ATENDIMENTO_MAE
     FROM RAWZN.RAW_HSP_TM_ATENDIMENTO
-    WHERE CD_PACIENTE = {cd_paciente}
-      AND DT_ATENDIMENTO >= DATE '{dt_inicio}'
-      AND DT_ATENDIMENTO <= DATE '{dt_fim}'
+    WHERE CD_ATENDIMENTO = {cd_atendimento_cid}
     UNION ALL
-    SELECT 'PSC' AS FONTE_ATEND, CD_ATENDIMENTO, CD_PACIENTE, CD_ATENDIMENTO_MAE, DT_ATENDIMENTO
+    SELECT CD_ATENDIMENTO, CD_PACIENTE, CD_ATENDIMENTO_MAE
     FROM RAWZN.RAW_PSC_TM_ATENDIMENTO
-    WHERE CD_PACIENTE = {cd_paciente}
-      AND DT_ATENDIMENTO >= DATE '{dt_inicio}'
-      AND DT_ATENDIMENTO <= DATE '{dt_fim}'
+    WHERE CD_ATENDIMENTO = {cd_atendimento_cid}
     """
     
-    atend_pd = run_sql(query_atend)
+    atend_cid_pd = run_sql(query_atend_cid)
     
-    if len(atend_pd) > 0:
-        for _, atend in atend_pd.iterrows():
-            # Identificar papel: é feto (tem CD_ATENDIMENTO_MAE) ou mãe?
-            cd_atendimento_mae_col = atend['CD_ATENDIMENTO_MAE']
+    if len(atend_cid_pd) > 0:
+        cd_atendimento_mae_col = atend_cid_pd.iloc[0]['CD_ATENDIMENTO_MAE']
+        
+        # CASO 1: CD_ATENDIMENTO_MAE = NULL → Paciente principal (buscar fetos dele)
+        if pd.isna(cd_atendimento_mae_col):
+            # Calcular janela ±7 dias
+            dt_inicio = (pd.to_datetime(dt_ref) - pd.Timedelta(days=JANELA_DIAS)).strftime('%Y-%m-%d')
+            dt_fim = (pd.to_datetime(dt_ref) + pd.Timedelta(days=JANELA_DIAS)).strftime('%Y-%m-%d')
             
-            if pd.notna(cd_atendimento_mae_col):
-                # É FETO
+            # Buscar todos atendimentos deste paciente na janela
+            query_atend_principal = f"""
+            SELECT CD_ATENDIMENTO
+            FROM RAWZN.RAW_HSP_TM_ATENDIMENTO
+            WHERE CD_PACIENTE = {cd_paciente}
+              AND DT_ATENDIMENTO >= DATE '{dt_inicio}'
+              AND DT_ATENDIMENTO <= DATE '{dt_fim}'
+            UNION ALL
+            SELECT CD_ATENDIMENTO
+            FROM RAWZN.RAW_PSC_TM_ATENDIMENTO
+            WHERE CD_PACIENTE = {cd_paciente}
+              AND DT_ATENDIMENTO >= DATE '{dt_inicio}'
+              AND DT_ATENDIMENTO <= DATE '{dt_fim}'
+            """
+            
+            atend_principal_pd = run_sql(query_atend_principal)
+            
+            if len(atend_principal_pd) > 0:
+                cd_atends = ", ".join(str(int(x)) for x in atend_principal_pd['CD_ATENDIMENTO'].unique())
+                
+                # Buscar fetos vinculados
+                query_fetos = f"""
+                SELECT CD_ATENDIMENTO, CD_PACIENTE, CD_ATENDIMENTO_MAE
+                FROM RAWZN.RAW_HSP_TM_ATENDIMENTO
+                WHERE CD_ATENDIMENTO_MAE IN ({cd_atends})
+                UNION ALL
+                SELECT CD_ATENDIMENTO, CD_PACIENTE, CD_ATENDIMENTO_MAE
+                FROM RAWZN.RAW_PSC_TM_ATENDIMENTO
+                WHERE CD_ATENDIMENTO_MAE IN ({cd_atends})
+                """
+                
+                fetos_pd = run_sql(query_fetos)
+                
+                if len(fetos_pd) > 0:
+                    # Tem fetos vinculados
+                    for _, feto in fetos_pd.iterrows():
+                        vinculos_cids_list.append({
+                            'cd_paciente_principal': cd_paciente,
+                            'nm_paciente_principal': None,  # buscar depois
+                            'cd_paciente_feto': int(feto['CD_PACIENTE']),
+                            'tem_feto_vinculado': 'SIM',
+                            'origem': 'CID'
+                        })
+                else:
+                    # Não tem fetos vinculados
+                    vinculos_cids_list.append({
+                        'cd_paciente_principal': cd_paciente,
+                        'nm_paciente_principal': None,
+                        'cd_paciente_feto': None,
+                        'tem_feto_vinculado': 'NAO',
+                        'origem': 'CID'
+                    })
+        
+        # CASO 2: CD_ATENDIMENTO_MAE != NULL → Este é um FETO, buscar a mãe
+        else:
+            cd_atendimento_mae = int(cd_atendimento_mae_col)
+            
+            # Buscar CD_PACIENTE da mãe através do CD_ATENDIMENTO_MAE
+            query_mae = f"""
+            SELECT CD_ATENDIMENTO, CD_PACIENTE
+            FROM RAWZN.RAW_HSP_TM_ATENDIMENTO
+            WHERE CD_ATENDIMENTO = {cd_atendimento_mae}
+            UNION ALL
+            SELECT CD_ATENDIMENTO, CD_PACIENTE
+            FROM RAWZN.RAW_PSC_TM_ATENDIMENTO
+            WHERE CD_ATENDIMENTO = {cd_atendimento_mae}
+            """
+            
+            mae_pd = run_sql(query_mae)
+            
+            if len(mae_pd) > 0:
+                cd_paciente_mae = int(mae_pd.iloc[0]['CD_PACIENTE'])
+                
                 vinculos_cids_list.append({
-                    'cd_paciente_mae': None,
-                    'cd_atendimento_mae': int(cd_atendimento_mae_col),
+                    'cd_paciente_principal': cd_paciente_mae,
+                    'nm_paciente_principal': None,  # buscar depois
                     'cd_paciente_feto': cd_paciente,
-                    'cd_atendimento_feto': atend['CD_ATENDIMENTO'],
-                    'papel': 'FETO',
-                    'cd_cid10': cd_cid10,
-                    'origem': 'CID'
-                })
-            else:
-                # É MÃE
-                vinculos_cids_list.append({
-                    'cd_paciente_mae': cd_paciente,
-                    'cd_atendimento_mae': atend['CD_ATENDIMENTO'],
-                    'cd_paciente_feto': None,
-                    'cd_atendimento_feto': None,
-                    'papel': 'MAE',
-                    'cd_cid10': cd_cid10,
+                    'tem_feto_vinculado': 'SIM',
                     'origem': 'CID'
                 })
 
@@ -430,65 +467,48 @@ if len(vinculos_cids_list) > 0:
     df_cids_vinculos = spark.createDataFrame(pd.DataFrame(vinculos_cids_list))
 else:
     schema = T.StructType([
-        T.StructField('cd_paciente_mae', T.LongType(), True),
-        T.StructField('cd_atendimento_mae', T.LongType(), True),
+        T.StructField('cd_paciente_principal', T.LongType(), True),
+        T.StructField('nm_paciente_principal', T.StringType(), True),
         T.StructField('cd_paciente_feto', T.LongType(), True),
-        T.StructField('cd_atendimento_feto', T.LongType(), True),
-        T.StructField('papel', T.StringType(), True),
-        T.StructField('cd_cid10', T.StringType(), True),
+        T.StructField('tem_feto_vinculado', T.StringType(), True),
         T.StructField('origem', T.StringType(), True)
     ])
     df_cids_vinculos = spark.createDataFrame([], schema)
 
 total_vinculos_cids = df_cids_vinculos.count()
-print(f"📊 Vínculos identificados nos CIDs:")
-print(f"   Total de registros: {total_vinculos_cids:,}")
+com_feto_cid = df_cids_vinculos.filter(F.col('cd_paciente_feto').isNotNull()).count()
+sem_feto_cid = total_vinculos_cids - com_feto_cid
 
-if total_vinculos_cids > 0:
-    print(f"\n📋 Distribuição por papel:")
-    df_cids_vinculos.groupBy('papel').count().show()
+print("=" * 80)
+print("CIDs - VÍNCULOS IDENTIFICADOS")
+print("=" * 80)
+print(f"Total de casos: {total_vinculos_cids:,}")
+print(f"Com feto vinculado: {com_feto_cid:,}")
+print(f"Sem feto vinculado: {sem_feto_cid:,}")
+print("=" * 80)
 
 df_cids_vinculos.createOrReplaceTempView("vw_cids_vinculos")
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 7. União e Deduplicação dos Pares (Mãe, Feto)
+# MAGIC ## 7. União e Deduplicação
 
 # COMMAND ----------
 
-# Padronizar estrutura dos laudos
-df_laudos_padrao = df_laudos_vinculos.select(
-    F.col('cd_paciente_mae'),
-    F.col('nm_mae'),
-    F.col('cd_atendimento_mae'),
-    F.col('cd_paciente_feto'),
-    F.col('cd_atendimento_feto'),
-    F.lit('LAUDO').alias('origem')
-)
+# União das duas fontes (já têm a mesma estrutura)
+df_uniao = df_laudos_vinculos.union(df_cids_vinculos)
 
-# Padronizar estrutura dos CIDs
-df_cids_padrao = df_cids_vinculos.select(
-    F.col('cd_paciente_mae'),
-    F.lit(None).cast(T.StringType()).alias('nm_mae'),  # buscar depois
-    F.col('cd_atendimento_mae'),
-    F.col('cd_paciente_feto'),
-    F.col('cd_atendimento_feto'),
-    F.lit('CID').alias('origem')
-)
-
-# União
-df_uniao = df_laudos_padrao.union(df_cids_padrao)
-
-# Agregar para identificar origem combinada
+# Agregar por (cd_paciente_principal, cd_paciente_feto) para identificar origem combinada
 df_consolidado = df_uniao.groupBy(
-    'cd_paciente_mae', 'cd_atendimento_mae', 'cd_paciente_feto', 'cd_atendimento_feto'
+    'cd_paciente_principal', 'cd_paciente_feto'
 ).agg(
-    F.max('nm_mae').alias('nm_mae'),
+    F.max('nm_paciente_principal').alias('nm_paciente_principal'),
+    F.max('tem_feto_vinculado').alias('tem_feto_vinculado'),
     F.collect_set('origem').alias('origens')
 )
 
-# Criar flag de origem
+# Criar flag de origem combinada
 df_consolidado = df_consolidado.withColumn(
     'origem_deteccao',
     F.when(F.array_contains('origens', 'LAUDO') & F.array_contains('origens', 'CID'), F.lit('AMBOS'))
@@ -501,11 +521,11 @@ com_feto_total = df_consolidado.filter(F.col('cd_paciente_feto').isNotNull()).co
 sem_feto_total = total_pares - com_feto_total
 
 print("=" * 80)
-print("CONSOLIDAÇÃO DOS PARES (MÃE, FETO)")
+print("CONSOLIDAÇÃO FINAL")
 print("=" * 80)
-print(f"Total de pares únicos: {total_pares:,}")
-print(f"Com feto identificado: {com_feto_total:,}")
-print(f"Sem feto identificado: {sem_feto_total:,}")
+print(f"Total de casos únicos: {total_pares:,}")
+print(f"Com feto vinculado: {com_feto_total:,}")
+print(f"Sem feto vinculado: {sem_feto_total:,}")
 print("\n📊 Por origem de detecção:")
 df_consolidado.groupBy('origem_deteccao').count().orderBy('origem_deteccao').show()
 print("=" * 80)
@@ -515,42 +535,68 @@ df_consolidado.createOrReplaceTempView("vw_pares_consolidados")
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 8. Buscar Nomes das Mães (quando faltante)
+# MAGIC ## 8. Buscar Nomes dos Pacientes e Fetos
 
 # COMMAND ----------
 
-# Buscar nomes das mães que estão faltando
 df_consolidado_pd = df_consolidado.toPandas()
 
-# Identificar mães sem nome
-maes_sem_nome = df_consolidado_pd[df_consolidado_pd['nm_mae'].isna()]['cd_paciente_mae'].unique()
+# Identificar pacientes principais sem nome
+pacientes_sem_nome = df_consolidado_pd[df_consolidado_pd['nm_paciente_principal'].isna()]['cd_paciente_principal'].unique()
 
-if len(maes_sem_nome) > 0:
-    maes_csv = ", ".join(str(int(x)) for x in maes_sem_nome if pd.notna(x))
+if len(pacientes_sem_nome) > 0:
+    pacientes_csv = ", ".join(str(int(x)) for x in pacientes_sem_nome if pd.notna(x))
     
-    if maes_csv:
+    if pacientes_csv:
         query_nomes = f"""
         SELECT CD_PACIENTE, NM_PACIENTE
         FROM RAWZN.RAW_HSP_TB_PACIENTE
-        WHERE CD_PACIENTE IN ({maes_csv})
+        WHERE CD_PACIENTE IN ({pacientes_csv})
         UNION ALL
         SELECT CD_PACIENTE, NM_PACIENTE
         FROM RAWZN.RAW_PSC_TB_PACIENTE
-        WHERE CD_PACIENTE IN ({maes_csv})
+        WHERE CD_PACIENTE IN ({pacientes_csv})
         """
         
         nomes_pd = run_sql(query_nomes)
         
-        # Mapear nomes
+        # Mapear nomes dos pacientes principais
         nomes_map = dict(zip(nomes_pd['CD_PACIENTE'], nomes_pd['NM_PACIENTE']))
-        df_consolidado_pd['nm_mae'] = df_consolidado_pd.apply(
-            lambda row: nomes_map.get(row['cd_paciente_mae'], row['nm_mae']) if pd.isna(row['nm_mae']) else row['nm_mae'],
+        df_consolidado_pd['nm_paciente_principal'] = df_consolidado_pd.apply(
+            lambda row: nomes_map.get(row['cd_paciente_principal'], row['nm_paciente_principal']) 
+                        if pd.isna(row['nm_paciente_principal']) else row['nm_paciente_principal'],
             axis=1
         )
 
+# Buscar nomes dos fetos
+fetos_com_cd = df_consolidado_pd[df_consolidado_pd['cd_paciente_feto'].notna()]['cd_paciente_feto'].unique()
+
+if len(fetos_com_cd) > 0:
+    fetos_csv = ", ".join(str(int(x)) for x in fetos_com_cd)
+    
+    query_nomes_fetos = f"""
+    SELECT CD_PACIENTE, NM_PACIENTE
+    FROM RAWZN.RAW_HSP_TB_PACIENTE
+    WHERE CD_PACIENTE IN ({fetos_csv})
+    UNION ALL
+    SELECT CD_PACIENTE, NM_PACIENTE
+    FROM RAWZN.RAW_PSC_TB_PACIENTE
+    WHERE CD_PACIENTE IN ({fetos_csv})
+    """
+    
+    nomes_fetos_pd = run_sql(query_nomes_fetos)
+    
+    # Mapear nomes dos fetos
+    nomes_fetos_map = dict(zip(nomes_fetos_pd['CD_PACIENTE'], nomes_fetos_pd['NM_PACIENTE']))
+    df_consolidado_pd['nm_paciente_feto'] = df_consolidado_pd['cd_paciente_feto'].apply(
+        lambda x: nomes_fetos_map.get(int(x)) if pd.notna(x) else None
+    )
+else:
+    df_consolidado_pd['nm_paciente_feto'] = None
+
 df_consolidado_nomes = spark.createDataFrame(df_consolidado_pd)
 
-print("✅ Nomes das mães complementados")
+print("✅ Nomes dos pacientes complementados")
 
 df_consolidado_nomes.createOrReplaceTempView("vw_pares_com_nomes")
 
@@ -562,18 +608,20 @@ df_consolidado_nomes.createOrReplaceTempView("vw_pares_com_nomes")
 # COMMAND ----------
 
 # Buscar lista de pacientes na auditoria
-query_auditoria_maes = """
+query_auditoria = """
 SELECT DISTINCT CD_PACIENTE
 FROM RAWZN.TB_AUDITORIA_OBITO_ITEM
 """
 
-auditoria_pd = run_sql(query_auditoria_maes)
+auditoria_pd = run_sql(query_auditoria)
 pacientes_auditados = set(auditoria_pd['CD_PACIENTE'].values)
+
+print(f"📋 Pacientes na auditoria oficial: {len(pacientes_auditados):,}")
 
 # Marcar quem está na auditoria
 df_consolidado_nomes_pd = df_consolidado_nomes.toPandas()
 
-df_consolidado_nomes_pd['mae_na_auditoria'] = df_consolidado_nomes_pd['cd_paciente_mae'].apply(
+df_consolidado_nomes_pd['principal_na_auditoria'] = df_consolidado_nomes_pd['cd_paciente_principal'].apply(
     lambda x: 'SIM' if pd.notna(x) and int(x) in pacientes_auditados else 'NAO'
 )
 
@@ -582,7 +630,7 @@ df_consolidado_nomes_pd['feto_na_auditoria'] = df_consolidado_nomes_pd['cd_pacie
 )
 
 df_consolidado_nomes_pd['na_auditoria'] = df_consolidado_nomes_pd.apply(
-    lambda row: 'SIM' if row['mae_na_auditoria'] == 'SIM' or row['feto_na_auditoria'] == 'SIM' else 'NAO',
+    lambda row: 'SIM' if row['principal_na_auditoria'] == 'SIM' or row['feto_na_auditoria'] == 'SIM' else 'NAO',
     axis=1
 )
 
