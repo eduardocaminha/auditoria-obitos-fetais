@@ -2,27 +2,19 @@
 # MAGIC %md
 # MAGIC # Silver: Processamento e Classificação
 # MAGIC 
-# MAGIC Lê dados do Bronze, classifica óbitos fetais e salva em Silver.
-# MAGIC 
-# MAGIC **Execução**: Diária (job Databricks)
-# MAGIC **Tabela**: `innovation_dev.silver.auditoria_obitos_fetais_processado`
+# MAGIC Lê a camada Bronze, classifica os laudos e grava a Silver.
+# MAGIC Notebook preparado para execuções stand-alone.
 
 # COMMAND ----------
 
-from pyspark.sql import SparkSession
-from pyspark.sql.functions import *
-from pyspark.sql.types import *
-import sys
-import re
+from pyspark.sql import functions as F
+from pyspark.sql import types as T
+from pyspark.sql.utils import AnalysisException
+import pandas as pd
 import unicodedata
-from datetime import datetime
+import re
 
-# Adicionar diretório do projeto ao path
-sys.path.append('/Workspace/Innovation/t_eduardo.caminha/auditoria-obitos-fetais/notebooks')
-
-spark = SparkSession.getActiveSession()
-
-# Padrões de óbito fetal (copiados de processar_obitos_fetais.py)
+# Padrões textuais de óbito fetal (mesmos utilizados no protótipo)
 patterns_obito = [
     (r"obito fetal", "óbito fetal"),
     (r"morte fetal", "morte fetal"),
@@ -50,204 +42,187 @@ patterns_obito = [
 
 BRONZE_TABLE = "innovation_dev.bronze.auditoria_obitos_fetais_raw"
 SILVER_TABLE = "innovation_dev.silver.auditoria_obitos_fetais_processado"
+SILVER_WRITE_MODE = "overwrite"  # Troque para "append" se necessário
 
 print("=" * 80)
 print("CONFIGURAÇÃO SILVER")
 print("=" * 80)
 print(f"Tabela Bronze: {BRONZE_TABLE}")
 print(f"Tabela Silver: {SILVER_TABLE}")
+print(f"Modo de gravação: {SILVER_WRITE_MODE}")
 print("=" * 80)
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 2. Ler Dados do Bronze
+# MAGIC ## 2. Ler Bronze
 
 # COMMAND ----------
 
-df_bronze = spark.table(BRONZE_TABLE)
+try:
+    bronze_df = spark.table(BRONZE_TABLE)
+except AnalysisException:
+    print(f"⚠️ Tabela Bronze {BRONZE_TABLE} não encontrada. Execute a ingestão antes de processar a Silver.")
+    bronze_pd = pd.DataFrame()
+else:
+    bronze_pd = bronze_df.toPandas()
 
-# Filtrar apenas novos registros (últimos 7 dias para processar tudo)
-df_bronze = df_bronze.filter(
-    col("DT_INGESTAO") >= current_date() - expr("INTERVAL 7 DAYS")
-)
-
-print(f"✅ Registros do Bronze: {df_bronze.count()}")
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## 3. Funções de Classificação (UDF)
+if bronze_pd.empty:
+    print("⚠️ Nenhum dado disponível para processamento.")
 
 # COMMAND ----------
 
-def normalize_text_udf(text):
-    """Normaliza texto para comparação"""
-    if not text:
-        return ""
-    text = str(text).lower()
-    text = unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode('utf-8')
-    text = re.sub(r'\s+', ' ', text)
-    return text
+if not bronze_pd.empty:
+    bronze_pd = bronze_pd[
+        bronze_pd['DS_LAUDO_MEDICO'].astype(str).str.strip().str.len() > 0
+    ]
 
-def extract_semanas_udf(text):
-    """Extrai semanas gestacionais"""
-    if not text:
-        return []
-    pattern = r"(\d{1,2})\s*(?:semanas?|s(?:\s*\d+\s*d)?)"
-    matches = re.findall(pattern, text)
-    semanas = list(set([int(m) for m in matches if m.isdigit()]))
-    return semanas
+    print(f"✅ Registros válidos carregados: {len(bronze_pd):,}")
 
-def has_ig_above_22_udf(text):
-    """Verifica se IG >= 22 semanas"""
-    semanas = extract_semanas_udf(text)
-    if len(semanas) == 0:
-        return False
-    return any(semana >= 22 for semana in semanas)
+    def normalize_text(text):
+        if pd.isna(text):
+            return ""
+        text = str(text).lower()
+        text = unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode('utf-8')
+        text = re.sub(r'\s+', ' ', text)
+        return text
 
-def detectar_padrao_obito_udf(texto_norm):
-    """Detecta qual padrão de óbito foi encontrado"""
-    if not texto_norm:
-        return None
-    
-    for pattern_tuple in patterns_obito:
-        pattern = pattern_tuple[0] if isinstance(pattern_tuple, tuple) else pattern_tuple
-        if re.search(pattern, texto_norm):
-            descricao = pattern_tuple[1] if isinstance(pattern_tuple, tuple) else pattern
-            return descricao
-    return None
+    def extract_semanas(text):
+        pattern = r"(\d{1,2})\s*(?:semanas?|s(?:\s*\d+\s*d)?)"
+        matches = re.findall(pattern, text)
+        semanas = list(set([int(m) for m in matches if m.isdigit()]))
+        return semanas
 
-def extrair_trecho_capturado_udf(texto_norm, texto_original, padrao_detectado):
-    """Extrai trecho do texto original com contexto"""
-    if not texto_original or not padrao_detectado:
-        return None
-    
-    texto_original_str = str(texto_original)
-    texto_original_norm = normalize_text_udf(texto_original_str)
-    
-    # Buscar padrão no texto original normalizado
-    for pattern_tuple in patterns_obito:
-        pattern = pattern_tuple[0] if isinstance(pattern_tuple, tuple) else pattern_tuple
-        match = re.search(pattern, texto_original_norm)
-        if match:
-            pos_inicio = match.start()
-            pos_fim = match.end()
-            
-            # Contexto de 50 caracteres
-            contexto = 50
-            inicio_contexto = max(0, pos_inicio - contexto)
-            fim_contexto = min(len(texto_original_str), pos_fim + contexto)
-            
-            return texto_original_str[inicio_contexto:fim_contexto].strip()
-    
-    return None
+    def has_ig_above_22_semanas(text):
+        semanas = extract_semanas(text)
+        if len(semanas) == 0:
+            return False
+        return any(sem >= 22 for sem in semanas)
 
-def classificar_obito_fetal_udf(texto_norm, texto_original):
-    """Classifica óbito fetal e retorna (classificacao, termo_detectado)"""
-    if not texto_norm:
-        return (0, None)
-    
-    # Passo 1: Detectar padrão
-    padrao_detectado = detectar_padrao_obito_udf(texto_norm)
-    if padrao_detectado is None:
-        return (0, None)
-    
-    # Passo 2: Verificar IG >= 22 semanas
-    if not has_ig_above_22_udf(texto_norm):
-        return (0, None)
-    
-    # Passo 3: Extrair trecho
-    trecho = extrair_trecho_capturado_udf(texto_norm, texto_original, padrao_detectado)
-    
-    return (1, trecho)
+    def classificar_obito_fetal(texto_norm, texto_original):
+        match_encontrado = None
+        pattern_match = None
 
-# Registrar UDFs
-normalize_text_udf_spark = udf(normalize_text_udf, StringType())
-extract_semanas_udf_spark = udf(extract_semanas_udf, ArrayType(IntegerType()))
-has_ig_above_22_udf_spark = udf(has_ig_above_22_udf, BooleanType())
-classificar_obito_fetal_udf_spark = udf(
-    lambda texto_original: classificar_obito_fetal_udf(
-        normalize_text_udf(texto_original), 
-        texto_original
-    ),
-    StructType([
-        StructField("obito_fetal_clinico", IntegerType()),
-        StructField("termo_detectado", StringType())
-    ])
-)
+        for pattern_tuple in patterns_obito:
+            pattern = pattern_tuple[0]
+            match = re.search(pattern, texto_norm)
+            if match:
+                match_encontrado = match
+                pattern_match = pattern
+                break
 
-# COMMAND ----------
+        if match_encontrado is None:
+            return (0, None)
 
-# MAGIC %md
-# MAGIC ## 4. Processar e Classificar
+        if not has_ig_above_22_semanas(texto_norm):
+            return (0, None)
 
-# COMMAND ----------
+        texto_original_str = str(texto_original)
+        texto_original_norm = normalize_text(texto_original_str)
 
-# Normalizar texto
-df_silver = df_bronze.withColumn(
-    "texto_normalizado",
-    normalize_text_udf_spark(col("DS_LAUDO_MEDICO"))
-)
+        match_original_norm = re.search(pattern_match, texto_original_norm)
 
-# Classificar
-df_silver = df_silver.withColumn(
-    "classificacao",
-    classificar_obito_fetal_udf_spark(col("DS_LAUDO_MEDICO"))
-)
+        if match_original_norm:
+            pos_inicio_norm = match_original_norm.start()
+            pos_fim_norm = match_original_norm.end()
+            len_original_norm = len(texto_original_norm)
+            len_original = len(texto_original_str)
 
-# Extrair campos da classificação
-df_silver = df_silver.withColumn(
-    "obito_fetal_clinico",
-    col("classificacao.obito_fetal_clinico")
-).withColumn(
-    "termo_detectado",
-    col("classificacao.termo_detectado")
-)
+            if len_original_norm > 0:
+                pos_inicio = int((pos_inicio_norm / len_original_norm) * len_original)
+                pos_fim = int((pos_fim_norm / len_original_norm) * len_original)
+            else:
+                pos_inicio = 0
+                pos_fim = len_original
+        else:
+            pos_inicio_norm = match_encontrado.start()
+            pos_fim_norm = match_encontrado.end()
+            len_norm = len(texto_norm)
+            len_original = len(texto_original_str)
 
-# Remover coluna temporária
-df_silver = df_silver.drop("classificacao")
+            if len_norm > 0:
+                pos_inicio = int((pos_inicio_norm / len_norm) * len_original)
+                pos_fim = int((pos_fim_norm / len_norm) * len_original)
+            else:
+                pos_inicio = 0
+                pos_fim = len_original
 
-# Adicionar timestamp de processamento
-df_silver = df_silver.withColumn(
-    "DT_PROCESSAMENTO",
-    current_timestamp()
-)
+        pos_inicio = max(0, pos_inicio)
+        pos_fim = min(len(texto_original_str), pos_fim)
 
-print(f"✅ Processamento concluído: {df_silver.count()} registros")
+        contexto = 50
+        inicio_contexto = max(0, pos_inicio - contexto)
+        fim_contexto = min(len(texto_original_str), pos_fim + contexto)
 
-# COMMAND ----------
+        trecho_capturado = texto_original_str[inicio_contexto:fim_contexto].strip()
 
-# MAGIC %md
-# MAGIC ## 5. Salvar em Delta Lake (Silver)
+        return (1, trecho_capturado)
 
-# COMMAND ----------
+    bronze_pd['texto_norm'] = bronze_pd['DS_LAUDO_MEDICO'].apply(normalize_text)
+    bronze_pd['classificacao'] = bronze_pd.apply(
+        lambda row: classificar_obito_fetal(row['texto_norm'], row['DS_LAUDO_MEDICO']), axis=1
+    )
+    bronze_pd['obito_fetal_clinico'] = bronze_pd['classificacao'].apply(lambda x: x[0])
+    bronze_pd['termo_detectado'] = bronze_pd['classificacao'].apply(lambda x: x[1])
 
-df_silver.write \
-    .format("delta") \
-    .mode("append") \
-    .option("mergeSchema", "true") \
-    .saveAsTable(SILVER_TABLE)
+    silver_pd = bronze_pd[bronze_pd['obito_fetal_clinico'] == 1].copy()
 
-print(f"✅ Dados salvos em {SILVER_TABLE}")
+    print(f"Laudos positivos identificados: {len(silver_pd):,}")
 
-# COMMAND ----------
+    colunas_renomear = {
+        'FONTE': 'fonte',
+        'CD_ATENDIMENTO': 'cd_atendimento',
+        'CD_OCORRENCIA': 'cd_ocorrencia',
+        'CD_ORDEM': 'cd_ordem',
+        'CD_PROCEDIMENTO': 'cd_procedimento',
+        'NM_PROCEDIMENTO': 'nm_procedimento',
+        'DS_LAUDO_MEDICO': 'texto_original',
+        'DT_PROCEDIMENTO_REALIZADO': 'dt_procedimento_realizado',
+        'CD_PACIENTE': 'cd_paciente',
+        'NM_PACIENTE': 'nm_paciente'
+    }
 
-# MAGIC %md
-# MAGIC ## 6. Estatísticas
+    silver_pd = silver_pd.rename(columns=colunas_renomear)
+    silver_pd = silver_pd.drop(columns=['classificacao', 'texto_norm'], errors='ignore')
 
-# COMMAND ----------
+    if silver_pd.empty:
+        try:
+            spark.table(SILVER_TABLE).limit(0)
+            print("ℹ️ Nenhum novo laudo positivo; Silver permanece inalterada.")
+        except AnalysisException:
+            print("ℹ️ Nenhum laudo positivo encontrado e tabela Silver ainda não existe.")
+    else:
+        silver_pd['dt_procedimento_realizado'] = pd.to_datetime(
+            silver_pd['dt_procedimento_realizado'], errors='coerce'
+        )
 
-total = df_silver.count()
-positivos = df_silver.filter(col("obito_fetal_clinico") == 1).count()
-percentual = (positivos / total * 100) if total > 0 else 0
+        silver_schema = T.StructType([
+            T.StructField('fonte', T.StringType(), True),
+            T.StructField('cd_atendimento', T.LongType(), True),
+            T.StructField('cd_ocorrencia', T.LongType(), True),
+            T.StructField('cd_ordem', T.LongType(), True),
+            T.StructField('cd_procedimento', T.LongType(), True),
+            T.StructField('nm_procedimento', T.StringType(), True),
+            T.StructField('texto_original', T.StringType(), True),
+            T.StructField('dt_procedimento_realizado', T.TimestampType(), True),
+            T.StructField('cd_paciente', T.LongType(), True),
+            T.StructField('nm_paciente', T.StringType(), True),
+            T.StructField('obito_fetal_clinico', T.IntegerType(), True),
+            T.StructField('termo_detectado', T.StringType(), True)
+        ])
 
-print("=" * 80)
-print("ESTATÍSTICAS SILVER")
-print("=" * 80)
-print(f"Total processado: {total}")
-print(f"Óbitos fetais detectados: {positivos} ({percentual:.2f}%)")
-print(f"Por fonte:")
-df_silver.groupBy("FONTE", "obito_fetal_clinico").count().show()
-print("=" * 80)
+        silver_df = spark.createDataFrame(silver_pd, schema=silver_schema)
+        silver_df = silver_df.withColumn(
+            'dt_referencia',
+            F.to_timestamp('dt_procedimento_realizado')
+        )
+        silver_df = silver_df.filter(F.col('dt_referencia').isNotNull())
+
+        print(f"💾 Gravando {silver_df.count():,} registros na Silver: {SILVER_TABLE}")
+        silver_writer = silver_df.write.format("delta").mode(SILVER_WRITE_MODE)
+        if SILVER_WRITE_MODE == "overwrite":
+            silver_writer = silver_writer.option("overwriteSchema", "true")
+        silver_writer.saveAsTable(SILVER_TABLE)
+        spark.catalog.refreshTable(SILVER_TABLE)
+
 

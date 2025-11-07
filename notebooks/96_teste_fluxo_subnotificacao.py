@@ -187,7 +187,7 @@ def carregar_bronze():
 
 def exibir_estatisticas_laudos(df_pd: pd.DataFrame):
     if len(df_pd) == 0:
-        print("⚠️ Nenhum laudo obstétrico encontrado para o período informado.")
+    print("⚠️ Nenhum laudo obstétrico encontrado para o período informado.")
         return
 
     total_exames = len(df_pd)

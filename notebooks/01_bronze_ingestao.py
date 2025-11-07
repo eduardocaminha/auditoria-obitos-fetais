@@ -2,10 +2,8 @@
 # MAGIC %md
 # MAGIC # Bronze: Ingestão de Laudos
 # MAGIC 
-# MAGIC Extrai laudos de ultrassom obstétrico (HSP + PSC) e salva em Delta Lake.
-# MAGIC 
-# MAGIC **Execução**: Diária (job Databricks)
-# MAGIC **Tabela**: `innovation_dev.bronze.auditoria_obitos_fetais_raw`
+# MAGIC Extrai laudos de ultrassom obstétrico (HSP + PSC) diretamente do Lake e grava a camada Bronze em Delta.
+# MAGIC Notebook pensado para execução manual/standalone.
 
 # COMMAND ----------
 
@@ -13,15 +11,11 @@
 
 # COMMAND ----------
 
-from pyspark.sql import SparkSession
-from pyspark.sql.functions import *
-from datetime import datetime, timedelta
-import sys
+from pyspark.sql import functions as F
+from pyspark.sql.utils import AnalysisException
+from datetime import datetime
+import pandas as pd
 
-# Adicionar diretório do projeto ao path
-sys.path.append('/Workspace/Innovation/t_eduardo.caminha/auditoria-obitos-fetais/notebooks')
-
-spark = SparkSession.getActiveSession()
 
 # COMMAND ----------
 
@@ -30,11 +24,9 @@ spark = SparkSession.getActiveSession()
 
 # COMMAND ----------
 
-# Parâmetros do período (último dia por padrão)
-# Para job diário, processa apenas o dia anterior
-DATA_PROCESSAMENTO = datetime.now() - timedelta(days=1)
-PERIODO_INICIO = DATA_PROCESSAMENTO.strftime('%Y-%m-%d')
-PERIODO_FIM = datetime.now().strftime('%Y-%m-%d')
+# Parâmetros manuais (ajuste conforme necessário)
+PERIODO_INICIO = '2025-10-01'
+PERIODO_FIM = '2025-11-01'
 
 # Lista de códigos de procedimento (ultrassom obstétrico)
 CD_PROCEDIMENTO_LIST = [
@@ -50,8 +42,9 @@ CD_PROCEDIMENTO_LIST = [
     98409033, 98409239, 98409030, 33010375,
 ]
 
-# Tabela Delta Bronze
+# Tabela Delta Bronze e modo de gravação
 BRONZE_TABLE = "innovation_dev.bronze.auditoria_obitos_fetais_raw"
+BRONZE_WRITE_MODE = "overwrite"  # overwrite ou append
 
 print("=" * 80)
 print("CONFIGURAÇÃO BRONZE")
@@ -59,6 +52,7 @@ print("=" * 80)
 print(f"Período: {PERIODO_INICIO} a {PERIODO_FIM}")
 print(f"Tabela Bronze: {BRONZE_TABLE}")
 print(f"Procedimentos: {len(CD_PROCEDIMENTO_LIST)}")
+print(f"Modo de gravação: {BRONZE_WRITE_MODE}")
 print("=" * 80)
 
 # COMMAND ----------
@@ -145,17 +139,54 @@ AND PREA.DT_PROCEDIMENTO_REALIZADO < DATE '{PERIODO_FIM}'
 AND LAUP.DS_LAUDO_MEDICO IS NOT NULL
 """
 
-# Executar query (retorna pandas)
-df_pandas = run_sql(query)
+laudos_pd = run_sql(query)
 
-# Converter para Spark DataFrame
-df_spark = spark.createDataFrame(df_pandas)
+if len(laudos_pd) == 0:
+    print("⚠️ Nenhum laudo encontrado para o período informado.")
+    df_bronze_pd = pd.DataFrame(columns=[
+        'FONTE', 'CD_ATENDIMENTO', 'CD_OCORRENCIA', 'CD_ORDEM', 'CD_PROCEDIMENTO',
+        'NM_PROCEDIMENTO', 'DS_LAUDO_MEDICO', 'DT_PROCEDIMENTO_REALIZADO',
+        'CD_PACIENTE', 'NM_PACIENTE'
+    ])
+else:
+    df_bronze_pd = pd.DataFrame(laudos_pd)
+    df_bronze_pd = df_bronze_pd[
+        df_bronze_pd['DS_LAUDO_MEDICO'].astype(str).str.strip().str.len() > 0
+    ]
 
-# Adicionar timestamp de ingestão no Spark (evita problemas de tipo com Oracle TIMESTAMP)
-from pyspark.sql.functions import current_timestamp
-df_spark = df_spark.withColumn("DT_INGESTAO", current_timestamp())
+    total_exames = len(df_bronze_pd)
+    pacientes_unicos = df_bronze_pd['CD_PACIENTE'].nunique()
+    exames_por_fonte = df_bronze_pd.groupby('FONTE').size()
 
-print(f"✅ Laudos extraídos: {df_spark.count()} registros")
+    print("=" * 80)
+    print("ESTATÍSTICAS DA EXTRAÇÃO")
+    print("=" * 80)
+    print(f"Total de exames: {total_exames:,}")
+    print(f"Pacientes únicos: {pacientes_unicos:,}")
+    if pacientes_unicos > 0:
+        print(f"Média de exames por paciente: {(total_exames / pacientes_unicos):.2f}")
+    print("\nPor fonte:")
+    for fonte, qtd in exames_por_fonte.items():
+        print(f"  {fonte}: {qtd:,} exames")
+    print("=" * 80)
+
+if len(df_bronze_pd) > 0:
+    df_bronze_pd['DT_PROCEDIMENTO_REALIZADO'] = pd.to_datetime(
+        df_bronze_pd['DT_PROCEDIMENTO_REALIZADO'], errors='coerce'
+    )
+
+    df_bronze = spark.createDataFrame(df_bronze_pd)
+    df_bronze = df_bronze.withColumn("DT_INGESTAO", F.current_timestamp())
+
+    print(f"💾 Gravando {df_bronze.count():,} registros na camada Bronze: {BRONZE_TABLE}")
+    df_bronze.write.format("delta").mode(BRONZE_WRITE_MODE).saveAsTable(BRONZE_TABLE)
+    spark.catalog.refreshTable(BRONZE_TABLE)
+else:
+    try:
+        spark.table(BRONZE_TABLE).limit(0)
+        print("ℹ️ Nenhuma atualização aplicada; tabela Bronze permanece inalterada.")
+    except AnalysisException:
+        print("ℹ️ Tabela Bronze ainda não existe e não há dados para criá-la.")
 
 # COMMAND ----------
 
