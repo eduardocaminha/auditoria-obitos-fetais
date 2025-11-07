@@ -46,7 +46,7 @@ JANELA_DIAS = 7
 # Tabelas
 SILVER_TABLE = "innovation_dev.silver.auditoria_obitos_fetais_processado"
 BRONZE_CID_TABLE = "innovation_dev.bronze.auditoria_obitos_cids"
-AUDITORIA_TABLE = "RAWZN.TB_AUDITORIA_OBITO"
+AUDITORIA_TABLE = "RAWZN.RAW_HSP_TB_AUDITORIA_OBITO"
 
 # Controle de camadas
 FORCAR_REPROCESSAMENTO_CID = False  # True para forçar nova extração dos CIDs
@@ -607,19 +607,19 @@ df_consolidado_nomes.createOrReplaceTempView("vw_pares_com_nomes")
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 9. Checar na Auditoria Oficial (TB_AUDITORIA_OBITO)
+# MAGIC ## 9. Checar na Auditoria Oficial (RAW_HSP_TB_AUDITORIA_OBITO)
 
 # COMMAND ----------
 
-# Buscar lista de pacientes na auditoria (via JOIN com atendimentos)
+# Buscar CD_ATENDIMENTO da auditoria e obter CD_PACIENTE via JOIN
 query_auditoria = """
 SELECT DISTINCT A.CD_PACIENTE
-FROM RAWZN.TB_AUDITORIA_OBITO AUD
+FROM RAWZN.RAW_HSP_TB_AUDITORIA_OBITO AUD
 INNER JOIN RAWZN.RAW_HSP_TM_ATENDIMENTO A
     ON AUD.CD_ATENDIMENTO = A.CD_ATENDIMENTO
 UNION
 SELECT DISTINCT A.CD_PACIENTE
-FROM RAWZN.TB_AUDITORIA_OBITO AUD
+FROM RAWZN.RAW_HSP_TB_AUDITORIA_OBITO AUD
 INNER JOIN RAWZN.RAW_PSC_TM_ATENDIMENTO A
     ON AUD.CD_ATENDIMENTO = A.CD_ATENDIMENTO
 """
