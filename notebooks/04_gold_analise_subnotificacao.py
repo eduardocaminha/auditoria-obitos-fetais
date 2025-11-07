@@ -733,20 +733,29 @@ cids_pd['atendimento_na_auditoria'] = cids_pd['CD_ATENDIMENTO'].astype(str).appl
 df_consolidado_nomes_pd = df_consolidado_nomes.toPandas()
 
 # Para cada linha do consolidado, verifico se veio de um atendimento auditado
+# Verifica TANTO a mãe QUANTO o feto
 def verificar_auditoria(row):
     cd_principal = str(row['cd_paciente_principal'])
+    cd_feto = row['cd_paciente_feto']
     origem = row['origem_deteccao']
     
-    # Verificar nos laudos
+    # Verificar mãe/principal nos laudos
     if 'LAUDO' in origem:
         laudos_match = df_laudos_pd[df_laudos_pd['cd_paciente'].astype(str) == cd_principal]
         if not laudos_match.empty and laudos_match['atendimento_na_auditoria'].any():
             return 'SIM'
     
-    # Verificar nos CIDs
+    # Verificar mãe/principal nos CIDs
     if 'CID' in origem:
         cids_match = cids_pd[cids_pd['CD_PACIENTE'].astype(str) == cd_principal]
         if not cids_match.empty and cids_match['atendimento_na_auditoria'].any():
+            return 'SIM'
+    
+    # Verificar FETO nos CIDs (se houver feto)
+    if pd.notna(cd_feto):
+        cd_feto_str = str(int(cd_feto))
+        cids_feto_match = cids_pd[cids_pd['CD_PACIENTE'].astype(str) == cd_feto_str]
+        if not cids_feto_match.empty and cids_feto_match['atendimento_na_auditoria'].any():
             return 'SIM'
     
     return 'NAO'
