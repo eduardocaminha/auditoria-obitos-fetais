@@ -12,6 +12,9 @@
 
 from pyspark.sql import functions as F, types as T
 from datetime import datetime
+import pandas as pd
+import unicodedata
+import re
 
 # COMMAND ----------
 
@@ -73,49 +76,260 @@ print(f"  Total de CIDs monitorados: {len(CID10_LIST)}")
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 2. Laudos obstétricos positivos (Silver)
+# MAGIC ## 2. Laudos obstétricos (extração direta do Lake)
 
 # COMMAND ----------
 
-cid_list_sql = ", ".join(f"'{cid}'" for cid in CID10_LIST)
+# Lista de procedimentos obstétricos (mesma dos notebooks de extração manual)
+CD_PROCEDIMENTO_LIST = [
+    33010110, 33010250, 33010269, 33010285,
+    33010295, 33010293, 40901238, 40901246,
+    40901505, 33010390, 33010501, 33020019,
+    99030250, 99030293, 33010360, 33019061,
+    33999901, 98409220, 98224063, 98409031,
+    98409043, 90020251, 33010382, 40901254,
+    40901289, 40901297, 40901262, 33010307,
+    40902013, 40901270, 33010609, 40902021,
+    99030110, 99030111, 98409145, 98409029,
+    98409033, 98409239, 98409030, 33010375,
+]
 
-df_laudos = spark.sql(f"""
-SELECT
-    fonte,
-    cd_atendimento,
-    cd_paciente,
-    nm_paciente,
-    dt_procedimento_realizado,
-    dt_processamento,
-    obito_fetal_clinico,
-    termo_detectado
-FROM innovation_dev.silver.auditoria_obitos_fetais_processado
-WHERE obito_fetal_clinico = 1
-  AND DATE(dt_procedimento_realizado) BETWEEN DATE '{PERIODO_INICIO}' AND DATE '{PERIODO_FIM}'
-""")
+procedimentos_csv = ", ".join(str(x) for x in CD_PROCEDIMENTO_LIST)
 
-if df_laudos.count() == 0:
-    print("⚠️ Nenhum laudo positivo encontrado para o período informado.")
+query_laudos = f"""
+SELECT 
+    'HSP' AS FONTE,
+    PREA.CD_ATENDIMENTO,
+    PREA.CD_OCORRENCIA,
+    PREA.CD_ORDEM,
+    PREA.CD_PROCEDIMENTO,
+    P.NM_PROCEDIMENTO,
+    LAUP.DS_LAUDO_MEDICO,
+    PREA.DT_PROCEDIMENTO_REALIZADO,
+    ATE.CD_PACIENTE,
+    PAC.NM_PACIENTE
+FROM RAWZN.RAW_HSP_TB_PROCEDIMENTO_REALIZADO PREA
+INNER JOIN RAWZN.RAW_HSP_TB_PROCEDIMENTO P
+    ON PREA.CD_PROCEDIMENTO = P.CD_PROCEDIMENTO
+INNER JOIN RAWZN.RAW_HSP_TB_LAUDO_PACIENTE LAUP 
+    ON PREA.CD_ATENDIMENTO = LAUP.CD_ATENDIMENTO 
+    AND PREA.CD_OCORRENCIA = LAUP.CD_OCORRENCIA 
+    AND PREA.CD_ORDEM = LAUP.CD_ORDEM
+INNER JOIN RAWZN.RAW_HSP_TM_ATENDIMENTO ATE
+    ON PREA.CD_ATENDIMENTO = ATE.CD_ATENDIMENTO
+INNER JOIN RAWZN.RAW_HSP_TB_PACIENTE PAC
+    ON ATE.CD_PACIENTE = PAC.CD_PACIENTE
+WHERE PREA.CD_PROCEDIMENTO IN ({procedimentos_csv})
+  AND PREA.DT_PROCEDIMENTO_REALIZADO >= DATE '{PERIODO_INICIO}'
+  AND PREA.DT_PROCEDIMENTO_REALIZADO < DATE '{PERIODO_FIM}'
+  AND LAUP.DS_LAUDO_MEDICO IS NOT NULL
+
+UNION ALL
+
+SELECT 
+    'PSC' AS FONTE,
+    PREA.CD_ATENDIMENTO,
+    PREA.CD_OCORRENCIA,
+    PREA.CD_ORDEM,
+    PREA.CD_PROCEDIMENTO,
+    P.NM_PROCEDIMENTO,
+    LAUP.DS_LAUDO_MEDICO,
+    PREA.DT_PROCEDIMENTO_REALIZADO,
+    ATE.CD_PACIENTE,
+    PAC.NM_PACIENTE
+FROM RAWZN.RAW_PSC_TB_PROCEDIMENTO_REALIZADO PREA
+INNER JOIN RAWZN.RAW_PSC_TB_PROCEDIMENTO P
+    ON PREA.CD_PROCEDIMENTO = P.CD_PROCEDIMENTO
+INNER JOIN RAWZN.RAW_PSC_TB_LAUDO_PACIENTE LAUP 
+    ON PREA.CD_ATENDIMENTO = LAUP.CD_ATENDIMENTO 
+    AND PREA.CD_OCORRENCIA = LAUP.CD_OCORRENCIA 
+    AND PREA.CD_ORDEM = LAUP.CD_ORDEM
+INNER JOIN RAWZN.RAW_PSC_TM_ATENDIMENTO ATE
+    ON PREA.CD_ATENDIMENTO = ATE.CD_ATENDIMENTO
+INNER JOIN RAWZN.RAW_PSC_TB_PACIENTE PAC
+    ON ATE.CD_PACIENTE = PAC.CD_PACIENTE
+WHERE PREA.CD_PROCEDIMENTO IN ({procedimentos_csv})
+  AND PREA.DT_PROCEDIMENTO_REALIZADO >= DATE '{PERIODO_INICIO}'
+  AND PREA.DT_PROCEDIMENTO_REALIZADO < DATE '{PERIODO_FIM}'
+  AND LAUP.DS_LAUDO_MEDICO IS NOT NULL
+"""
+
+laudos_pd = run_sql(query_laudos)
+
+if len(laudos_pd) == 0:
+    print("⚠️ Nenhum laudo obstétrico encontrado para o período informado.")
+    df_laudos_pd = pd.DataFrame(columns=[
+        'FONTE', 'CD_ATENDIMENTO', 'CD_OCORRENCIA', 'CD_ORDEM', 'CD_PROCEDIMENTO',
+        'NM_PROCEDIMENTO', 'DS_LAUDO_MEDICO', 'DT_PROCEDIMENTO_REALIZADO',
+        'CD_PACIENTE', 'NM_PACIENTE'
+    ])
 else:
-    print(f"✅ Laudos positivos: {df_laudos.count():,}")
-    display(df_laudos.select('fonte', 'cd_atendimento', 'cd_paciente', 'dt_procedimento_realizado', 'termo_detectado'))
+    df_laudos_pd = pd.DataFrame(laudos_pd)
+    df_laudos_pd = df_laudos_pd[
+        df_laudos_pd['DS_LAUDO_MEDICO'].astype(str).str.strip().str.len() > 0
+    ]
+
+    total_exames = len(df_laudos_pd)
+    pacientes_unicos = df_laudos_pd['CD_PACIENTE'].nunique()
+    exames_por_fonte = df_laudos_pd.groupby('FONTE').size()
+
+    print("=" * 80)
+    print("ESTATÍSTICAS DOS LAUDOS EXTRAÍDOS")
+    print("=" * 80)
+    print(f"Total de exames: {total_exames:,}")
+    print(f"Pacientes únicos: {pacientes_unicos:,}")
+    if pacientes_unicos > 0:
+        print(f"Média de exames por paciente: {(total_exames / pacientes_unicos):.2f}")
+    print("\nPor fonte:")
+    for fonte, qtd in exames_por_fonte.items():
+        print(f"  {fonte}: {qtd:,} exames")
+    print("=" * 80)
 
 # COMMAND ----------
 
-# Preparar referência temporal (garantir timestamp)
+# Normalização e classificação rápida (mesma lógica do processamento Silver)
+
+def normalize_text(text):
+    if pd.isna(text):
+        return ""
+    text = str(text).lower()
+    text = unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode('utf-8')
+    text = re.sub(r'\s+', ' ', text)
+    return text
+
+def extract_semanas(text):
+    pattern = r"(\d{1,2})\s*(?:semanas?|s(?:\s*\d+\s*d)?)"
+    matches = re.findall(pattern, text)
+    semanas = list(set([int(m) for m in matches if m.isdigit()]))
+    return semanas
+
+def has_ig_above_22_semanas(text):
+    semanas = extract_semanas(text)
+    if len(semanas) == 0:
+        return False
+    return any(sem >= 22 for sem in semanas)
+
+patterns_obito = [
+    (r"obito fetal", "óbito fetal"),
+    (r"morte fetal", "morte fetal"),
+    (r"obito intra.?uterino", "óbito intrauterino"),
+    (r"feto morto", "feto morto"),
+    (r"sem batimentos cardiacos fetais", "sem batimentos cardíacos fetais"),
+    (r"ausencia de batimentos cardiacos fetais", "ausência de batimentos cardíacos fetais"),
+    (r"batimentos cardiacos fetais nao (?:caracterizados|demonstrados|identificados)", "batimentos cardíacos fetais não caracterizados"),
+    (r"sem atividade cardiaca fetal", "sem atividade cardíaca fetal"),
+    (r"ausencia de atividade cardiaca fetal", "ausência de atividade cardíaca fetal"),
+    (r"feto sem vitalidade", "feto sem vitalidade"),
+    (r"sem movimentos fetais", "sem movimentos fetais"),
+    (r"ausencia de movimentos fetais", "ausência de movimentos fetais"),
+    (r"movimentos (?:corporeos|fetais) (?:e|e/ou)?.*nao (?:caracterizados|demonstrados|identificados)", "movimentos corpóreos/fetais não caracterizados"),
+    (r"cessacao.*atividade cardiaca", "cessação de atividade cardíaca"),
+    (r"morte do feto", "morte do feto"),
+]
+
+def classificar_obito_fetal(texto_norm, texto_original):
+    match_encontrado = None
+    pattern_match = None
+
+    for pattern_tuple in patterns_obito:
+        pattern = pattern_tuple[0]
+        match = re.search(pattern, texto_norm)
+        if match:
+            match_encontrado = match
+            pattern_match = pattern
+            break
+
+    if match_encontrado is None:
+        return (0, None)
+
+    if not has_ig_above_22_semanas(texto_norm):
+        return (0, None)
+
+    texto_original_str = str(texto_original)
+    texto_original_norm = normalize_text(texto_original_str)
+
+    match_original_norm = re.search(pattern_match, texto_original_norm)
+
+    if match_original_norm:
+        pos_inicio_norm = match_original_norm.start()
+        pos_fim_norm = match_original_norm.end()
+        len_original_norm = len(texto_original_norm)
+        len_original = len(texto_original_str)
+
+        if len_original_norm > 0:
+            pos_inicio = int((pos_inicio_norm / len_original_norm) * len_original)
+            pos_fim = int((pos_fim_norm / len_original_norm) * len_original)
+        else:
+            pos_inicio = 0
+            pos_fim = len_original
+    else:
+        pos_inicio_norm = match_encontrado.start()
+        pos_fim_norm = match_encontrado.end()
+        len_norm = len(texto_norm)
+        len_original = len(texto_original_str)
+
+        if len_norm > 0:
+            pos_inicio = int((pos_inicio_norm / len_norm) * len_original)
+            pos_fim = int((pos_fim_norm / len_norm) * len_original)
+        else:
+            pos_inicio = 0
+            pos_fim = len_original
+
+    pos_inicio = max(0, pos_inicio)
+    pos_fim = min(len(texto_original_str), pos_fim)
+
+    contexto = 50
+    inicio_contexto = max(0, pos_inicio - contexto)
+    fim_contexto = min(len(texto_original_str), pos_fim + contexto)
+
+    trecho_capturado = texto_original_str[inicio_contexto:fim_contexto].strip()
+
+    return (1, trecho_capturado)
+
+if len(df_laudos_pd) > 0:
+    df_laudos_pd['texto_norm'] = df_laudos_pd['DS_LAUDO_MEDICO'].apply(normalize_text)
+    df_laudos_pd['classificacao'] = df_laudos_pd.apply(
+        lambda row: classificar_obito_fetal(row['texto_norm'], row['DS_LAUDO_MEDICO']), axis=1
+    )
+    df_laudos_pd['obito_fetal_clinico'] = df_laudos_pd['classificacao'].apply(lambda x: x[0])
+    df_laudos_pd['termo_detectado'] = df_laudos_pd['classificacao'].apply(lambda x: x[1])
+
+    df_laudos_pos_pd = df_laudos_pd[df_laudos_pd['obito_fetal_clinico'] == 1].copy()
+
+    print(f"Laudos positivos identificados pelo classificador: {len(df_laudos_pos_pd):,}")
+    display(df_laudos_pos_pd[['FONTE', 'CD_ATENDIMENTO', 'CD_PACIENTE', 'DT_PROCEDIMENTO_REALIZADO', 'termo_detectado']].head(10))
+else:
+    df_laudos_pos_pd = pd.DataFrame(columns=df_laudos_pd.columns)
+
+colunas_renomear = {
+    'FONTE': 'fonte',
+    'CD_ATENDIMENTO': 'cd_atendimento',
+    'CD_OCORRENCIA': 'cd_ocorrencia',
+    'CD_ORDEM': 'cd_ordem',
+    'CD_PROCEDIMENTO': 'cd_procedimento',
+    'NM_PROCEDIMENTO': 'nm_procedimento',
+    'DS_LAUDO_MEDICO': 'texto_original',
+    'DT_PROCEDIMENTO_REALIZADO': 'dt_procedimento_realizado',
+    'CD_PACIENTE': 'cd_paciente',
+    'NM_PACIENTE': 'nm_paciente'
+}
+
+df_laudos_pos_pd = df_laudos_pos_pd.rename(columns=colunas_renomear)
+df_laudos_pos_pd = df_laudos_pos_pd.drop(columns=['classificacao'], errors='ignore')
+
+df_laudos = spark.createDataFrame(df_laudos_pos_pd)
+
+# Preparar referência temporal
 df_laudos = df_laudos.withColumn(
     "dt_referencia",
-    F.coalesce(
-        F.to_timestamp('dt_procedimento_realizado'),
-        F.to_timestamp('dt_processamento')
-    )
+    F.to_timestamp('dt_procedimento_realizado')
 )
 
 df_laudos = df_laudos.filter(F.col('dt_referencia').isNotNull())
 
 df_laudos.createOrReplaceTempView("vw_laudos_pos")
 
-print(f"Laudos com referência temporal: {df_laudos.count():,}")
+print(f"Laudos positivos com referência temporal: {df_laudos.count():,}")
 
 # COMMAND ----------
 
