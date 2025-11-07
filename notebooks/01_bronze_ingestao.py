@@ -170,6 +170,13 @@ else:
         print(f"  {fonte}: {qtd:,} exames")
     print("=" * 80)
 
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 4. Transformação e Gravação Bronze
+
+# COMMAND ----------
+
 if len(df_bronze_pd) > 0:
     df_bronze_pd['DT_PROCEDIMENTO_REALIZADO'] = pd.to_datetime(
         df_bronze_pd['DT_PROCEDIMENTO_REALIZADO'], errors='coerce'
@@ -205,7 +212,17 @@ if len(df_bronze_pd) > 0:
     
     spark.catalog.refreshTable(BRONZE_TABLE)
     
-    # Estatísticas finais
+    print("✅ Bronze gravada com sucesso!")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 5. Estatísticas Finais
+
+# COMMAND ----------
+
+try:
+    df_bronze = spark.table(BRONZE_TABLE)
     total = df_bronze.count()
     pacientes_unicos = df_bronze.select("CD_PACIENTE").distinct().count()
     
@@ -217,10 +234,6 @@ if len(df_bronze_pd) > 0:
     print(f"Por fonte:")
     df_bronze.groupBy("FONTE").count().show()
     print("=" * 80)
-else:
-    try:
-        spark.table(BRONZE_TABLE).limit(0)
-        print("ℹ️ Nenhuma atualização aplicada; tabela Bronze permanece inalterada.")
-    except AnalysisException:
-        print("ℹ️ Tabela Bronze ainda não existe e não há dados para criá-la.")
+except AnalysisException:
+    print("ℹ️ Tabela Bronze ainda não existe e não há dados para criá-la.")
 
