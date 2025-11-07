@@ -36,6 +36,14 @@ BRONZE_TABLE = "innovation_dev.bronze.auditoria_obitos_fetais_raw"
 SILVER_TABLE = "innovation_dev.silver.auditoria_obitos_fetais_processado"
 FORCAR_REPROCESSAMENTO_BRONZE = False
 
+connect_to_datalake(
+    username="USR_PROD_INFORMATICA_SAUDE",
+    password=dbutils.secrets.get(scope="INNOVATION_RAW", key="USR_PROD_INFORMATICA_SAUDE"),
+    layer="RAWZN",
+    level="LOW",
+    dbx_secret_scope="INNOVATION_RAW"
+)
+
 # Lista de CIDs associados a óbito fetal / eventos correlatos
 CID10_LIST = [
     # Núcleo (altamente específicos para óbito fetal)
