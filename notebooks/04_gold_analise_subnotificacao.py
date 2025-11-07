@@ -795,10 +795,8 @@ def buscar_ultimo_laudo(cd_paciente):
     laudos_paciente = laudos_paciente.sort_values('dt_procedimento_realizado', ascending=False)
     laudo_recente = laudos_paciente.iloc[0]['texto_original']
     
-    # Limitar tamanho do laudo para não quebrar Excel
-    if laudo_recente and len(str(laudo_recente)) > 500:
-        return str(laudo_recente)[:497] + "..."
-    return laudo_recente
+    # Retornar laudo completo
+    return laudo_recente if laudo_recente else None
 
 # Buscar CIDs
 cids_bronze_pd = df_cids.select('CD_PACIENTE', 'CD_CID10').toPandas()
