@@ -1,0 +1,626 @@
+# Databricks notebook source
+# MAGIC %md
+# MAGIC # Gold: Análise de Subnotificações
+# MAGIC 
+# MAGIC Detecta possíveis subnotificações de óbito fetal cruzando laudos positivos e CIDs diagnósticos.
+# MAGIC Identifica vínculos mãe-feto e valida contra auditoria oficial.
+
+# COMMAND ----------
+
+# MAGIC %run /Workspace/Libraries/Lake
+
+# COMMAND ----------
+
+from pyspark.sql import functions as F
+from pyspark.sql import types as T
+from pyspark.sql.utils import AnalysisException
+from datetime import datetime
+import pandas as pd
+
+try:
+    import openpyxl
+except ImportError:
+    import subprocess
+    subprocess.check_call(["pip", "install", "openpyxl"])
+    import openpyxl
+
+from openpyxl import Workbook
+from openpyxl.utils.dataframe import dataframe_to_rows
+from openpyxl.styles import Font, PatternFill
+from openpyxl.utils import get_column_letter
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 1. Configuração
+
+# COMMAND ----------
+
+# Período analisado
+PERIODO_INICIO = '2025-10-01'
+PERIODO_FIM = '2025-11-01'
+
+# Janela temporal (±dias) para buscar atendimentos relacionados
+JANELA_DIAS = 7
+
+# Tabelas
+SILVER_TABLE = "innovation_dev.silver.auditoria_obitos_fetais_processado"
+AUDITORIA_TABLE = "RAWZN.TB_AUDITORIA_OBITO_ITEM"
+
+# CIDs associados a óbito fetal
+CID10_LIST = [
+    # Núcleo (altamente específicos)
+    'P95',      # Morte fetal de causa não especificada
+    'P96.4',    # Morte neonatal precoce de causa não especificada
+    'O36.4',    # Cuidado materno por morte intrauterina
+    'O31.1',    # Morte de um feto ou mais em gestação múltipla
+    'O31.2',    # Feto papiráceo
+    'Z37.1',    # Nascimento de feto morto único
+    'Z37.3',    # Gêmeos – um vivo e um morto
+    'Z37.4',    # Gêmeos – ambos mortos
+    'Z37.6',    # Múltiplos – alguns vivos e outros mortos
+    'Z37.7',    # Múltiplos – todos mortos
+    # Contexto forte (placenta/cordão)
+    'O43.1',    # Descolamento prematuro da placenta
+    'O69.1',    # Compressão do cordão umbilical
+    'O69.2',    # Prolapso do cordão umbilical
+    'O69.3',    # Circular de cordão com compressão
+    'O69.8',    # Outras complicações do cordão
+    'O69.9',    # Complicação não especificada do cordão
+]
+
+# Output
+OUTPUT_PATH = "/Workspace/Innovation/t_eduardo.caminha/auditoria-obitos-fetais/outputs"
+DATA_PROCESSAMENTO = datetime.now().strftime('%Y%m%d_%H%M%S')
+EXCEL_FILENAME = f"subnotificacoes_{DATA_PROCESSAMENTO}.xlsx"
+EXCEL_PATH = f"{OUTPUT_PATH}/{EXCEL_FILENAME}"
+
+print("=" * 80)
+print("CONFIGURAÇÃO - ANÁLISE DE SUBNOTIFICAÇÕES")
+print("=" * 80)
+print(f"Período: {PERIODO_INICIO} a {PERIODO_FIM}")
+print(f"Janela temporal: ±{JANELA_DIAS} dias")
+print(f"Total de CIDs monitorados: {len(CID10_LIST)}")
+print(f"Tabela Silver: {SILVER_TABLE}")
+print(f"Tabela Auditoria: {AUDITORIA_TABLE}")
+print(f"Arquivo de saída: {EXCEL_FILENAME}")
+print("=" * 80)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 2. Conectar ao Datalake
+
+# COMMAND ----------
+
+connect_to_datalake(
+    username="USR_PROD_INFORMATICA_SAUDE",
+    password=dbutils.secrets.get(scope="INNOVATION_RAW", key="USR_PROD_INFORMATICA_SAUDE"),
+    layer="RAWZN",
+    level="LOW",
+    dbx_secret_scope="INNOVATION_RAW"
+)
+
+print("✅ Conexão com datalake estabelecida")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 3. Ler Laudos Positivos (Silver)
+
+# COMMAND ----------
+
+try:
+    df_laudos_silver = spark.table(SILVER_TABLE)
+    
+    # Aplicar filtro de período
+    df_laudos_silver = df_laudos_silver.filter(
+        (F.col('dt_procedimento_realizado') >= F.lit(PERIODO_INICIO)) &
+        (F.col('dt_procedimento_realizado') < F.lit(PERIODO_FIM))
+    )
+    
+    total_laudos = df_laudos_silver.count()
+    print(f"✅ Laudos positivos carregados: {total_laudos:,}")
+    
+    if total_laudos == 0:
+        raise RuntimeError("⚠️ Nenhum laudo positivo encontrado para o período. Execute o processamento Silver primeiro.")
+    
+except AnalysisException:
+    raise RuntimeError(f"⚠️ Tabela Silver {SILVER_TABLE} não encontrada. Execute o processamento Silver primeiro.")
+
+df_laudos_silver.createOrReplaceTempView("vw_laudos_positivos")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 4. FONTE 1: Vincular Mães e Fetos dos Laudos
+
+# COMMAND ----------
+
+query_vinculos_laudos = f"""
+WITH LAUDOS AS (
+    SELECT DISTINCT
+        cd_paciente AS cd_paciente_mae,
+        nm_paciente AS nm_mae,
+        dt_procedimento_realizado AS dt_referencia,
+        fonte,
+        cd_atendimento
+    FROM vw_laudos_positivos
+),
+ATENDIMENTOS_MAE AS (
+    SELECT 'HSP' AS fonte_atend, CD_ATENDIMENTO, CD_PACIENTE, DT_ATENDIMENTO
+    FROM RAWZN.RAW_HSP_TM_ATENDIMENTO
+    UNION ALL
+    SELECT 'PSC' AS fonte_atend, CD_ATENDIMENTO, CD_PACIENTE, DT_ATENDIMENTO
+    FROM RAWZN.RAW_PSC_TM_ATENDIMENTO
+),
+FETOS AS (
+    SELECT 'HSP' AS fonte_feto, CD_ATENDIMENTO AS cd_atendimento_feto, 
+           CD_PACIENTE AS cd_paciente_feto, CD_ATENDIMENTO_MAE, DT_ATENDIMENTO AS dt_atendimento_feto
+    FROM RAWZN.RAW_HSP_TM_ATENDIMENTO
+    WHERE CD_ATENDIMENTO_MAE IS NOT NULL
+    UNION ALL
+    SELECT 'PSC' AS fonte_feto, CD_ATENDIMENTO AS cd_atendimento_feto, 
+           CD_PACIENTE AS cd_paciente_feto, CD_ATENDIMENTO_MAE, DT_ATENDIMENTO AS dt_atendimento_feto
+    FROM RAWZN.RAW_PSC_TM_ATENDIMENTO
+    WHERE CD_ATENDIMENTO_MAE IS NOT NULL
+)
+SELECT
+    L.cd_paciente_mae,
+    L.nm_mae,
+    L.dt_referencia,
+    L.fonte AS fonte_laudo,
+    L.cd_atendimento AS cd_atendimento_laudo,
+    A.CD_ATENDIMENTO AS cd_atendimento_mae,
+    A.DT_ATENDIMENTO AS dt_atendimento_mae,
+    F.fonte_feto,
+    F.cd_atendimento_feto,
+    F.cd_paciente_feto,
+    F.dt_atendimento_feto,
+    'LAUDO' AS origem
+FROM LAUDOS L
+INNER JOIN ATENDIMENTOS_MAE A
+    ON A.CD_PACIENTE = L.cd_paciente_mae
+    AND A.DT_ATENDIMENTO BETWEEN DATE_ADD(L.dt_referencia, -{JANELA_DIAS}) 
+                              AND DATE_ADD(L.dt_referencia, {JANELA_DIAS})
+LEFT JOIN FETOS F
+    ON F.CD_ATENDIMENTO_MAE = A.CD_ATENDIMENTO
+"""
+
+df_laudos_vinculos = spark.sql(query_vinculos_laudos)
+
+total_vinculos_laudos = df_laudos_vinculos.count()
+com_feto = df_laudos_vinculos.filter(F.col('cd_paciente_feto').isNotNull()).count()
+sem_feto = total_vinculos_laudos - com_feto
+
+print(f"📊 Vínculos identificados nos LAUDOS:")
+print(f"   Total de registros: {total_vinculos_laudos:,}")
+print(f"   Com feto vinculado: {com_feto:,}")
+print(f"   Sem feto vinculado: {sem_feto:,}")
+
+df_laudos_vinculos.createOrReplaceTempView("vw_laudos_vinculos")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 5. FONTE 2: Buscar CIDs de Óbito Fetal
+
+# COMMAND ----------
+
+cid_sql_list = ", ".join(f"'{cid}'" for cid in CID10_LIST)
+
+query_cids = f"""
+SELECT
+    FONTE,
+    CD_ATENDIMENTO,
+    CD_PACIENTE,
+    CD_CID10,
+    DT_REFERENCIA
+FROM (
+    SELECT
+        'HSP' AS FONTE,
+        CD_ATENDIMENTO,
+        CD_PACIENTE,
+        CD_CID10,
+        COALESCE(DT_DIAGNOSTICO, DT_ATENDIMENTO) AS DT_REFERENCIA,
+        NVL(FL_VALIDADO, 'S') AS FL_VALIDADO
+    FROM RAWZN.RAW_HSP_TB_DIAGNOSTICO_ATENDIMENTO
+    WHERE CD_CID10 IN ({cid_sql_list})
+      AND COALESCE(DT_DIAGNOSTICO, DT_ATENDIMENTO) >= DATE '{PERIODO_INICIO}'
+      AND COALESCE(DT_DIAGNOSTICO, DT_ATENDIMENTO) < DATE '{PERIODO_FIM}'
+    
+    UNION ALL
+    
+    SELECT
+        'PSC' AS FONTE,
+        CD_ATENDIMENTO,
+        CD_PACIENTE,
+        CD_CID10,
+        COALESCE(DT_DIAGNOSTICO, DT_ATENDIMENTO) AS DT_REFERENCIA,
+        NVL(FL_VALIDADO, 'S') AS FL_VALIDADO
+    FROM RAWZN.RAW_PSC_TB_DIAGNOSTICO_ATENDIMENTO
+    WHERE CD_CID10 IN ({cid_sql_list})
+      AND COALESCE(DT_DIAGNOSTICO, DT_ATENDIMENTO) >= DATE '{PERIODO_INICIO}'
+      AND COALESCE(DT_DIAGNOSTICO, DT_ATENDIMENTO) < DATE '{PERIODO_FIM}'
+) DIAG
+WHERE DIAG.FL_VALIDADO = 'S'
+"""
+
+df_cids = spark.sql(query_cids)
+
+total_cids = df_cids.count()
+print(f"✅ Diagnósticos com CIDs de óbito fetal: {total_cids:,}")
+
+if total_cids > 0:
+    print(f"\n📋 CIDs mais frequentes:")
+    df_cids.groupBy('CD_CID10').count().orderBy(F.desc('count')).show(10, truncate=False)
+
+df_cids.createOrReplaceTempView("vw_cids_obito")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 6. FONTE 2: Vincular Mães e Fetos dos CIDs
+
+# COMMAND ----------
+
+query_vinculos_cids = f"""
+WITH CIDS AS (
+    SELECT DISTINCT
+        CD_PACIENTE,
+        CD_ATENDIMENTO,
+        FONTE,
+        DT_REFERENCIA,
+        CD_CID10
+    FROM vw_cids_obito
+),
+ATENDIMENTOS AS (
+    SELECT 'HSP' AS fonte_atend, CD_ATENDIMENTO, CD_PACIENTE, CD_ATENDIMENTO_MAE, DT_ATENDIMENTO
+    FROM RAWZN.RAW_HSP_TM_ATENDIMENTO
+    UNION ALL
+    SELECT 'PSC' AS fonte_atend, CD_ATENDIMENTO, CD_PACIENTE, CD_ATENDIMENTO_MAE, DT_ATENDIMENTO
+    FROM RAWZN.RAW_PSC_TM_ATENDIMENTO
+),
+PACIENTES AS (
+    SELECT 'HSP' AS fonte_pac, CD_PACIENTE, NM_PACIENTE
+    FROM RAWZN.RAW_HSP_TB_PACIENTE
+    UNION ALL
+    SELECT 'PSC' AS fonte_pac, CD_PACIENTE, NM_PACIENTE
+    FROM RAWZN.RAW_PSC_TB_PACIENTE
+),
+-- Buscar atendimentos relacionados (±janela)
+ATEND_RELACIONADOS AS (
+    SELECT DISTINCT
+        C.CD_PACIENTE AS cd_paciente_cid,
+        C.CD_ATENDIMENTO AS cd_atendimento_cid,
+        C.FONTE AS fonte_cid,
+        C.DT_REFERENCIA,
+        C.CD_CID10,
+        A.CD_ATENDIMENTO AS cd_atendimento_relacionado,
+        A.CD_PACIENTE AS cd_paciente_relacionado,
+        A.CD_ATENDIMENTO_MAE,
+        A.DT_ATENDIMENTO
+    FROM CIDS C
+    INNER JOIN ATENDIMENTOS A
+        ON A.CD_PACIENTE = C.CD_PACIENTE
+        AND A.DT_ATENDIMENTO BETWEEN DATE_ADD(C.DT_REFERENCIA, -{JANELA_DIAS}) 
+                                  AND DATE_ADD(C.DT_REFERENCIA, {JANELA_DIAS})
+)
+-- Identificar papel: é feto (tem CD_ATENDIMENTO_MAE) ou mãe?
+SELECT
+    AR.cd_paciente_cid,
+    AR.cd_atendimento_cid,
+    AR.fonte_cid,
+    AR.DT_REFERENCIA,
+    AR.CD_CID10,
+    CASE 
+        WHEN AR.CD_ATENDIMENTO_MAE IS NOT NULL THEN 'FETO'
+        ELSE 'MAE'
+    END AS papel,
+    CASE
+        WHEN AR.CD_ATENDIMENTO_MAE IS NOT NULL THEN AR.CD_ATENDIMENTO_MAE
+        ELSE AR.cd_atendimento_relacionado
+    END AS cd_atendimento_mae,
+    CASE
+        WHEN AR.CD_ATENDIMENTO_MAE IS NOT NULL THEN NULL
+        ELSE AR.cd_paciente_relacionado
+    END AS cd_paciente_mae,
+    CASE
+        WHEN AR.CD_ATENDIMENTO_MAE IS NOT NULL THEN AR.cd_atendimento_relacionado
+        ELSE NULL
+    END AS cd_atendimento_feto,
+    CASE
+        WHEN AR.CD_ATENDIMENTO_MAE IS NOT NULL THEN AR.cd_paciente_relacionado
+        ELSE NULL
+    END AS cd_paciente_feto,
+    'CID' AS origem
+FROM ATEND_RELACIONADOS AR
+"""
+
+df_cids_vinculos = spark.sql(query_vinculos_cids)
+
+total_vinculos_cids = df_cids_vinculos.count()
+print(f"📊 Vínculos identificados nos CIDs:")
+print(f"   Total de registros: {total_vinculos_cids:,}")
+
+if total_vinculos_cids > 0:
+    print(f"\n📋 Distribuição por papel:")
+    df_cids_vinculos.groupBy('papel').count().show()
+
+df_cids_vinculos.createOrReplaceTempView("vw_cids_vinculos")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 7. União e Deduplicação dos Pares (Mãe, Feto)
+
+# COMMAND ----------
+
+# Padronizar estrutura dos laudos
+df_laudos_padrao = df_laudos_vinculos.select(
+    F.col('cd_paciente_mae'),
+    F.col('nm_mae'),
+    F.col('cd_atendimento_mae'),
+    F.col('cd_paciente_feto'),
+    F.col('cd_atendimento_feto'),
+    F.lit('LAUDO').alias('origem')
+)
+
+# Padronizar estrutura dos CIDs
+df_cids_padrao = df_cids_vinculos.select(
+    F.col('cd_paciente_mae'),
+    F.lit(None).cast(T.StringType()).alias('nm_mae'),  # buscar depois
+    F.col('cd_atendimento_mae'),
+    F.col('cd_paciente_feto'),
+    F.col('cd_atendimento_feto'),
+    F.lit('CID').alias('origem')
+)
+
+# União
+df_uniao = df_laudos_padrao.union(df_cids_padrao)
+
+# Agregar para identificar origem combinada
+df_consolidado = df_uniao.groupBy(
+    'cd_paciente_mae', 'cd_atendimento_mae', 'cd_paciente_feto', 'cd_atendimento_feto'
+).agg(
+    F.max('nm_mae').alias('nm_mae'),
+    F.collect_set('origem').alias('origens')
+)
+
+# Criar flag de origem
+df_consolidado = df_consolidado.withColumn(
+    'origem_deteccao',
+    F.when(F.array_contains('origens', 'LAUDO') & F.array_contains('origens', 'CID'), F.lit('AMBOS'))
+     .when(F.array_contains('origens', 'LAUDO'), F.lit('LAUDO'))
+     .otherwise(F.lit('CID'))
+).drop('origens')
+
+total_pares = df_consolidado.count()
+com_feto_total = df_consolidado.filter(F.col('cd_paciente_feto').isNotNull()).count()
+sem_feto_total = total_pares - com_feto_total
+
+print("=" * 80)
+print("CONSOLIDAÇÃO DOS PARES (MÃE, FETO)")
+print("=" * 80)
+print(f"Total de pares únicos: {total_pares:,}")
+print(f"Com feto identificado: {com_feto_total:,}")
+print(f"Sem feto identificado: {sem_feto_total:,}")
+print("\n📊 Por origem de detecção:")
+df_consolidado.groupBy('origem_deteccao').count().orderBy('origem_deteccao').show()
+print("=" * 80)
+
+df_consolidado.createOrReplaceTempView("vw_pares_consolidados")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 8. Buscar Nomes das Mães (quando faltante)
+
+# COMMAND ----------
+
+query_nomes = """
+WITH PACIENTES AS (
+    SELECT 'HSP' AS fonte, CD_PACIENTE, NM_PACIENTE
+    FROM RAWZN.RAW_HSP_TB_PACIENTE
+    UNION ALL
+    SELECT 'PSC' AS fonte, CD_PACIENTE, NM_PACIENTE
+    FROM RAWZN.RAW_PSC_TB_PACIENTE
+)
+SELECT
+    PC.cd_paciente_mae,
+    PC.cd_atendimento_mae,
+    PC.cd_paciente_feto,
+    PC.cd_atendimento_feto,
+    COALESCE(PC.nm_mae, P.NM_PACIENTE) AS nm_mae,
+    PC.origem_deteccao
+FROM vw_pares_consolidados PC
+LEFT JOIN PACIENTES P
+    ON P.CD_PACIENTE = PC.cd_paciente_mae
+    AND PC.nm_mae IS NULL
+"""
+
+df_consolidado_nomes = spark.sql(query_nomes)
+
+print("✅ Nomes das mães complementados")
+
+df_consolidado_nomes.createOrReplaceTempView("vw_pares_com_nomes")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 9. Checar na Auditoria Oficial
+
+# COMMAND ----------
+
+query_auditoria = f"""
+SELECT
+    PC.cd_paciente_mae,
+    PC.nm_mae,
+    PC.cd_atendimento_mae,
+    PC.cd_paciente_feto,
+    PC.cd_atendimento_feto,
+    PC.origem_deteccao,
+    CASE 
+        WHEN AUD_MAE.CD_PACIENTE IS NOT NULL THEN 'SIM'
+        ELSE 'NAO'
+    END AS mae_na_auditoria,
+    CASE 
+        WHEN AUD_FETO.CD_PACIENTE IS NOT NULL THEN 'SIM'
+        ELSE 'NAO'
+    END AS feto_na_auditoria,
+    CASE
+        WHEN AUD_MAE.CD_PACIENTE IS NOT NULL OR AUD_FETO.CD_PACIENTE IS NOT NULL THEN 'SIM'
+        ELSE 'NAO'
+    END AS na_auditoria
+FROM vw_pares_com_nomes PC
+LEFT JOIN {AUDITORIA_TABLE} AUD_MAE
+    ON AUD_MAE.CD_PACIENTE = PC.cd_paciente_mae
+LEFT JOIN {AUDITORIA_TABLE} AUD_FETO
+    ON AUD_FETO.CD_PACIENTE = PC.cd_paciente_feto
+"""
+
+df_com_auditoria = spark.sql(query_auditoria)
+
+total_na_auditoria = df_com_auditoria.filter(F.col('na_auditoria') == 'SIM').count()
+total_nao_auditados = df_com_auditoria.filter(F.col('na_auditoria') == 'NAO').count()
+
+print("=" * 80)
+print("CHECAGEM NA AUDITORIA OFICIAL")
+print("=" * 80)
+print(f"Total de casos: {df_com_auditoria.count():,}")
+print(f"Presentes na auditoria: {total_na_auditoria:,}")
+print(f"NÃO presentes (subnotificações): {total_nao_auditados:,}")
+print("=" * 80)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 10. Filtrar Apenas Subnotificações
+
+# COMMAND ----------
+
+df_subnotificacoes = df_com_auditoria.filter(F.col('na_auditoria') == 'NAO')
+
+print(f"🚨 SUBNOTIFICAÇÕES DETECTADAS: {df_subnotificacoes.count():,}")
+
+if df_subnotificacoes.count() > 0:
+    print("\n📊 Por origem de detecção:")
+    df_subnotificacoes.groupBy('origem_deteccao').count().orderBy('origem_deteccao').show()
+    
+    print("\n📊 Com/sem feto identificado:")
+    df_subnotificacoes.withColumn(
+        'feto_identificado',
+        F.when(F.col('cd_paciente_feto').isNotNull(), 'COM_FETO').otherwise('SEM_FETO')
+    ).groupBy('feto_identificado').count().show()
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 11. Exportar para Excel
+
+# COMMAND ----------
+
+# Converter para pandas
+subnotificacoes_pd = df_subnotificacoes.toPandas()
+todos_casos_pd = df_com_auditoria.toPandas()
+
+# Estatísticas
+stats_origem = todos_casos_pd.groupby(['origem_deteccao', 'na_auditoria']).size().reset_index(name='total')
+stats_feto = todos_casos_pd.groupby([
+    'na_auditoria',
+    todos_casos_pd['cd_paciente_feto'].notna().map({True: 'COM_FETO', False: 'SEM_FETO'})
+]).size().reset_index(name='total')
+
+stats_overview = pd.DataFrame({
+    'metrica': [
+        'Total de casos detectados',
+        'Casos na auditoria',
+        'SUBNOTIFICAÇÕES DETECTADAS',
+        'Subnotificações com feto identificado',
+        'Subnotificações sem feto identificado',
+        'Detectados por LAUDO apenas',
+        'Detectados por CID apenas',
+        'Detectados por AMBOS',
+        'Período analisado',
+        'Janela temporal',
+        'Data de processamento'
+    ],
+    'valor': [
+        len(todos_casos_pd),
+        len(todos_casos_pd[todos_casos_pd['na_auditoria'] == 'SIM']),
+        len(subnotificacoes_pd),
+        len(subnotificacoes_pd[subnotificacoes_pd['cd_paciente_feto'].notna()]),
+        len(subnotificacoes_pd[subnotificacoes_pd['cd_paciente_feto'].isna()]),
+        len(todos_casos_pd[todos_casos_pd['origem_deteccao'] == 'LAUDO']),
+        len(todos_casos_pd[todos_casos_pd['origem_deteccao'] == 'CID']),
+        len(todos_casos_pd[todos_casos_pd['origem_deteccao'] == 'AMBOS']),
+        f"{PERIODO_INICIO} a {PERIODO_FIM}",
+        f"±{JANELA_DIAS} dias",
+        datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    ]
+})
+
+# Criar Excel
+wb = Workbook()
+wb.remove(wb.active)
+
+def escrever_aba(nome, dataframe):
+    """Escreve um DataFrame em uma aba do Excel com formatação"""
+    ws = wb.create_sheet(nome)
+    for row in dataframe_to_rows(dataframe, index=False, header=True):
+        ws.append(row)
+    
+    # Formatar cabeçalho
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
+        cell.fill = PatternFill(start_color="FFC000", end_color="FFC000", fill_type="solid")
+    
+    # Ajustar largura das colunas
+    for column_cells in ws.columns:
+        max_length = max(len(str(cell.value)) if cell.value is not None else 0 for cell in column_cells)
+        adjusted_width = max_length + 2
+        ws.column_dimensions[get_column_letter(column_cells[0].column)].width = min(adjusted_width, 60)
+
+# Criar abas
+escrever_aba("1_Resumo", stats_overview)
+escrever_aba("2_Subnotificacoes", subnotificacoes_pd)
+escrever_aba("3_Todos_Casos", todos_casos_pd)
+escrever_aba("4_Stats_Origem", stats_origem)
+escrever_aba("5_Stats_Feto", stats_feto)
+
+# Salvar
+import os
+os.makedirs(OUTPUT_PATH, exist_ok=True)
+wb.save(EXCEL_PATH)
+
+print("=" * 80)
+print("✅ ARQUIVO EXCEL GERADO COM SUCESSO!")
+print("=" * 80)
+print(f"📁 Local: {EXCEL_PATH}")
+print(f"📊 Abas criadas:")
+print(f"   1. Resumo Geral")
+print(f"   2. Subnotificações ({len(subnotificacoes_pd):,} casos)")
+print(f"   3. Todos os Casos ({len(todos_casos_pd):,} registros)")
+print(f"   4. Estatísticas por Origem")
+print(f"   5. Estatísticas Feto Identificado")
+print("=" * 80)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 12. Resumo Final
+
+# COMMAND ----------
+
+print("=" * 80)
+print("RESUMO FINAL - ANÁLISE DE SUBNOTIFICAÇÕES")
+print("=" * 80)
+print(f"🔍 Período analisado: {PERIODO_INICIO} a {PERIODO_FIM}")
+print(f"📋 Laudos positivos: {total_laudos:,}")
+print(f"🏥 Diagnósticos CID: {total_cids:,}")
+print(f"👥 Pares (mãe, feto) únicos: {total_pares:,}")
+print(f"✅ Casos na auditoria: {total_na_auditoria:,}")
+print(f"🚨 SUBNOTIFICAÇÕES DETECTADAS: {total_nao_auditados:,}")
+print(f"📁 Arquivo: {EXCEL_FILENAME}")
+print("=" * 80)
+
