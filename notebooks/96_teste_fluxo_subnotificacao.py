@@ -23,6 +23,16 @@ import re
 
 # COMMAND ----------
 
+# Alguns workspaces Unity habilitados usam um catálogo padrão sem acesso.
+# Garantimos o catálogo clássico (hive_metastore) para consultas RAWZN.
+try:
+    spark.sql("USE CATALOG hive_metastore")
+    print("Catálogo ajustado para hive_metastore.")
+except Exception as e:
+    print(f"Aviso: não foi possível alterar catálogo automaticamente: {e}")
+
+# COMMAND ----------
+
 # Período analisado (ajuste conforme necessário)
 PERIODO_INICIO = '2024-01-01'
 PERIODO_FIM = '2024-01-31'
