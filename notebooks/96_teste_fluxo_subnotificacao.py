@@ -23,16 +23,6 @@ import re
 
 # COMMAND ----------
 
-# Alguns workspaces Unity habilitados usam um catálogo padrão sem acesso.
-# Garantimos o catálogo clássico (hive_metastore) para consultas RAWZN.
-try:
-    spark.sql("USE CATALOG hive_metastore")
-    print("Catálogo ajustado para hive_metastore.")
-except Exception as e:
-    print(f"Aviso: não foi possível alterar catálogo automaticamente: {e}")
-
-# COMMAND ----------
-
 # Período analisado (ajuste conforme necessário)
 PERIODO_INICIO = '2024-01-01'
 PERIODO_FIM = '2024-01-31'
@@ -349,38 +339,38 @@ print(f"Laudos positivos com referência temporal: {df_laudos.count():,}")
 # COMMAND ----------
 
 query_atendimentos_mae = f"""
-WITH laudos AS (
+WITH LAUDOS AS (
     SELECT DISTINCT
-        cd_atendimento AS cd_atendimento_laud,
-        cd_paciente AS cd_paciente_mae,
-        nm_paciente,
-        dt_referencia,
-        termo_detectado
-    FROM vw_laudos_pos
+        CD_ATENDIMENTO AS CD_ATENDIMENTO_LAUD,
+        CD_PACIENTE AS CD_PACIENTE_MAE,
+        NM_PACIENTE,
+        DT_REFERENCIA,
+        TERMO_DETECTADO
+    FROM VW_LAUDOS_POS
 )
-
-, atendimentos_mae AS (
-    SELECT 'HSP' AS fonte, tm.cd_atendimento, tm.cd_paciente, tm.cd_atendimento_mae, tm.dt_atendimento
-    FROM RAWZN.RAW_HSP_TM_ATENDIMENTO tm
+,
+ATENDIMENTOS_MAE AS (
+    SELECT 'HSP' AS FONTE, TM.CD_ATENDIMENTO, TM.CD_PACIENTE, TM.CD_ATENDIMENTO_MAE, TM.DT_ATENDIMENTO
+    FROM RAWZN.RAW_HSP_TM_ATENDIMENTO TM
     UNION ALL
-    SELECT 'PSC' AS fonte, tm.cd_atendimento, tm.cd_paciente, tm.cd_atendimento_mae, tm.dt_atendimento
-    FROM RAWZN.RAW_PSC_TM_ATENDIMENTO tm
+    SELECT 'PSC' AS FONTE, TM.CD_ATENDIMENTO, TM.CD_PACIENTE, TM.CD_ATENDIMENTO_MAE, TM.DT_ATENDIMENTO
+    FROM RAWZN.RAW_PSC_TM_ATENDIMENTO TM
 )
 
 SELECT
-    l.cd_atendimento_laud,
-    l.cd_paciente_mae,
-    l.nm_paciente,
-    l.dt_referencia,
-    l.termo_detectado,
-    a.fonte,
-    a.cd_atendimento AS cd_atendimento_mae,
-    a.dt_atendimento AS dt_atendimento_mae
-FROM laudos l
-JOIN atendimentos_mae a
-  ON a.cd_paciente = l.cd_paciente_mae
- AND a.dt_atendimento BETWEEN l.dt_referencia - INTERVAL {JANELA_DIAS} DAYS
-                           AND l.dt_referencia + INTERVAL {JANELA_DIAS} DAYS
+    L.CD_ATENDIMENTO_LAUD,
+    L.CD_PACIENTE_MAE,
+    L.NM_PACIENTE,
+    L.DT_REFERENCIA,
+    L.TERMO_DETECTADO,
+    A.FONTE,
+    A.CD_ATENDIMENTO AS CD_ATENDIMENTO_MAE,
+    A.DT_ATENDIMENTO AS DT_ATENDIMENTO_MAE
+FROM LAUDOS L
+JOIN ATENDIMENTOS_MAE A
+  ON A.CD_PACIENTE = L.CD_PACIENTE_MAE
+ AND A.DT_ATENDIMENTO BETWEEN L.DT_REFERENCIA - INTERVAL {JANELA_DIAS} DAYS
+                           AND L.DT_REFERENCIA + INTERVAL {JANELA_DIAS} DAYS
 """
 
 df_atendimentos_mae = spark.sql(query_atendimentos_mae)
@@ -398,31 +388,31 @@ df_atendimentos_mae.createOrReplaceTempView("vw_atendimentos_mae")
 # COMMAND ----------
 
 query_fetos = """
-WITH fetos AS (
-    SELECT 'HSP' AS fonte, tm.cd_atendimento, tm.cd_paciente, tm.cd_atendimento_mae, tm.dt_atendimento
-    FROM RAWZN.RAW_HSP_TM_ATENDIMENTO tm
-    WHERE tm.cd_atendimento_mae IS NOT NULL
+WITH FETOS AS (
+    SELECT 'HSP' AS FONTE, TM.CD_ATENDIMENTO, TM.CD_PACIENTE, TM.CD_ATENDIMENTO_MAE, TM.DT_ATENDIMENTO
+    FROM RAWZN.RAW_HSP_TM_ATENDIMENTO TM
+    WHERE TM.CD_ATENDIMENTO_MAE IS NOT NULL
     UNION ALL
-    SELECT 'PSC' AS fonte, tm.cd_atendimento, tm.cd_paciente, tm.cd_atendimento_mae, tm.dt_atendimento
-    FROM RAWZN.RAW_PSC_TM_ATENDIMENTO tm
-    WHERE tm.cd_atendimento_mae IS NOT NULL
+    SELECT 'PSC' AS FONTE, TM.CD_ATENDIMENTO, TM.CD_PACIENTE, TM.CD_ATENDIMENTO_MAE, TM.DT_ATENDIMENTO
+    FROM RAWZN.RAW_PSC_TM_ATENDIMENTO TM
+    WHERE TM.CD_ATENDIMENTO_MAE IS NOT NULL
 )
 
 SELECT
-    mae.cd_atendimento_laud,
-    mae.cd_paciente_mae,
-    mae.nm_paciente,
-    mae.dt_referencia,
-    mae.fonte AS fonte_mae,
-    mae.cd_atendimento_mae,
-    mae.dt_atendimento_mae,
-    f.fonte AS fonte_feto,
-    f.cd_atendimento AS cd_atendimento_feto,
-    f.cd_paciente AS cd_paciente_feto,
-    f.dt_atendimento AS dt_atendimento_feto
-FROM vw_atendimentos_mae mae
-LEFT JOIN fetos f
-  ON f.cd_atendimento_mae = mae.cd_atendimento_mae
+    MAE.CD_ATENDIMENTO_LAUD,
+    MAE.CD_PACIENTE_MAE,
+    MAE.NM_PACIENTE,
+    MAE.DT_REFERENCIA,
+    MAE.FONTE AS FONTE_MAE,
+    MAE.CD_ATENDIMENTO_MAE,
+    MAE.DT_ATENDIMENTO_MAE,
+    F.FONTE AS FONTE_FETO,
+    F.CD_ATENDIMENTO AS CD_ATENDIMENTO_FETO,
+    F.CD_PACIENTE AS CD_PACIENTE_FETO,
+    F.DT_ATENDIMENTO AS DT_ATENDIMENTO_FETO
+FROM VW_ATENDIMENTOS_MAE MAE
+LEFT JOIN FETOS F
+  ON F.CD_ATENDIMENTO_MAE = MAE.CD_ATENDIMENTO_MAE
 """
 
 df_vinculos = spark.sql(query_fetos)
@@ -452,37 +442,37 @@ cid_sql_list = ", ".join(f"'{cid}'" for cid in CID10_LIST)
 
 query_cid = f"""
 SELECT
-    diag.fonte,
-    diag.cd_atendimento,
-    diag.cd_paciente,
-    diag.cd_cid10,
-    diag.dt_referencia
+    DIAG.FONTE,
+    DIAG.CD_ATENDIMENTO,
+    DIAG.CD_PACIENTE,
+    DIAG.CD_CID10,
+    DIAG.DT_REFERENCIA
 FROM (
     SELECT
-        'HSP' AS fonte,
-        cd_atendimento,
-        cd_paciente,
-        cd_cid10,
-        COALESCE(dt_diagnostico, dt_atendimento) AS dt_referencia,
-        NVL(fl_validado, 'S') AS fl_validado
+        'HSP' AS FONTE,
+        CD_ATENDIMENTO,
+        CD_PACIENTE,
+        CD_CID10,
+        COALESCE(DT_DIAGNOSTICO, DT_ATENDIMENTO) AS DT_REFERENCIA,
+        NVL(FL_VALIDADO, 'S') AS FL_VALIDADO
     FROM RAWZN.RAW_HSP_TB_DIAGNOSTICO_ATENDIMENTO
-    WHERE cd_cid10 IN ({cid_sql_list})
-      AND COALESCE(dt_diagnostico, dt_atendimento) BETWEEN DATE '{PERIODO_INICIO}' AND DATE '{PERIODO_FIM}' + 1 - INTERVAL '1' SECOND
+    WHERE CD_CID10 IN ({cid_sql_list})
+      AND COALESCE(DT_DIAGNOSTICO, DT_ATENDIMENTO) BETWEEN DATE '{PERIODO_INICIO}' AND DATE '{PERIODO_FIM}' + 1 - INTERVAL '1' SECOND
 
     UNION ALL
 
     SELECT
-        'PSC' AS fonte,
-        cd_atendimento,
-        cd_paciente,
-        cd_cid10,
-        COALESCE(dt_diagnostico, dt_atendimento) AS dt_referencia,
-        NVL(fl_validado, 'S') AS fl_validado
+        'PSC' AS FONTE,
+        CD_ATENDIMENTO,
+        CD_PACIENTE,
+        CD_CID10,
+        COALESCE(DT_DIAGNOSTICO, DT_ATENDIMENTO) AS DT_REFERENCIA,
+        NVL(FL_VALIDADO, 'S') AS FL_VALIDADO
     FROM RAWZN.RAW_PSC_TB_DIAGNOSTICO_ATENDIMENTO
-    WHERE cd_cid10 IN ({cid_sql_list})
-      AND COALESCE(dt_diagnostico, dt_atendimento) BETWEEN DATE '{PERIODO_INICIO}' AND DATE '{PERIODO_FIM}' + 1 - INTERVAL '1' SECOND
-) diag
-WHERE diag.fl_validado = 'S'
+    WHERE CD_CID10 IN ({cid_sql_list})
+      AND COALESCE(DT_DIAGNOSTICO, DT_ATENDIMENTO) BETWEEN DATE '{PERIODO_INICIO}' AND DATE '{PERIODO_FIM}' + 1 - INTERVAL '1' SECOND
+) DIAG
+WHERE DIAG.FL_VALIDADO = 'S'
 """
 
 df_cid = spark.sql(query_cid)
@@ -557,11 +547,11 @@ df_atendimentos_unicos.createOrReplaceTempView("vw_atendimentos_alvo")
 
 query_auditoria = f"""
 SELECT
-    alvo.cd_atendimento,
-    CASE WHEN audit.cd_atendimento IS NOT NULL THEN 'SIM' ELSE 'NAO' END AS na_auditoria
-FROM vw_atendimentos_alvo alvo
-LEFT JOIN {AUDITORIA_TABLE} audit
-  ON audit.cd_atendimento = alvo.cd_atendimento
+    ALVO.CD_ATENDIMENTO,
+    CASE WHEN AUDIT.CD_ATENDIMENTO IS NOT NULL THEN 'SIM' ELSE 'NAO' END AS NA_AUDITORIA
+FROM VW_ATENDIMENTOS_ALVO ALVO
+LEFT JOIN {AUDITORIA_TABLE} AUDIT
+  ON AUDIT.CD_ATENDIMENTO = ALVO.CD_ATENDIMENTO
 """
 
 df_auditoria_flag = spark.sql(query_auditoria)
