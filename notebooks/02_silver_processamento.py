@@ -72,91 +72,105 @@ if bronze_pd.empty:
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC ## 3. Funções de Classificação
+
+# COMMAND ----------
+
+def normalize_text(text):
+    if pd.isna(text):
+        return ""
+    text = str(text).lower()
+    text = unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode('utf-8')
+    text = re.sub(r'\s+', ' ', text)
+    return text
+
+def extract_semanas(text):
+    pattern = r"(\d{1,2})\s*(?:semanas?|s(?:\s*\d+\s*d)?)"
+    matches = re.findall(pattern, text)
+    semanas = list(set([int(m) for m in matches if m.isdigit()]))
+    return semanas
+
+def has_ig_above_22_semanas(text):
+    semanas = extract_semanas(text)
+    if len(semanas) == 0:
+        return False
+    return any(sem >= 22 for sem in semanas)
+
+def classificar_obito_fetal(texto_norm, texto_original):
+    match_encontrado = None
+    pattern_match = None
+    
+    for pattern_tuple in patterns_obito:
+        pattern = pattern_tuple[0]
+        match = re.search(pattern, texto_norm)
+        if match:
+            match_encontrado = match
+            pattern_match = pattern
+            break
+
+    if match_encontrado is None:
+        return (0, None)
+
+    if not has_ig_above_22_semanas(texto_norm):
+        return (0, None)
+    
+    texto_original_str = str(texto_original)
+    texto_original_norm = normalize_text(texto_original_str)
+
+    match_original_norm = re.search(pattern_match, texto_original_norm)
+
+    if match_original_norm:
+        pos_inicio_norm = match_original_norm.start()
+        pos_fim_norm = match_original_norm.end()
+        len_original_norm = len(texto_original_norm)
+        len_original = len(texto_original_str)
+
+        if len_original_norm > 0:
+            pos_inicio = int((pos_inicio_norm / len_original_norm) * len_original)
+            pos_fim = int((pos_fim_norm / len_original_norm) * len_original)
+        else:
+            pos_inicio = 0
+            pos_fim = len_original
+    else:
+        pos_inicio_norm = match_encontrado.start()
+        pos_fim_norm = match_encontrado.end()
+        len_norm = len(texto_norm)
+        len_original = len(texto_original_str)
+
+        if len_norm > 0:
+            pos_inicio = int((pos_inicio_norm / len_norm) * len_original)
+            pos_fim = int((pos_fim_norm / len_norm) * len_original)
+        else:
+            pos_inicio = 0
+            pos_fim = len_original
+
+    pos_inicio = max(0, pos_inicio)
+    pos_fim = min(len(texto_original_str), pos_fim)
+
+    contexto = 50
+    inicio_contexto = max(0, pos_inicio - contexto)
+    fim_contexto = min(len(texto_original_str), pos_fim + contexto)
+    
+    trecho_capturado = texto_original_str[inicio_contexto:fim_contexto].strip()
+    
+    return (1, trecho_capturado)
+
+print("✅ Funções de classificação definidas")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 4. Aplicar Classificação
+
+# COMMAND ----------
+
 if not bronze_pd.empty:
     bronze_pd = bronze_pd[
         bronze_pd['DS_LAUDO_MEDICO'].astype(str).str.strip().str.len() > 0
     ]
 
-    print(f"✅ Registros válidos carregados: {len(bronze_pd):,}")
-
-    def normalize_text(text):
-        if pd.isna(text):
-            return ""
-        text = str(text).lower()
-        text = unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode('utf-8')
-        text = re.sub(r'\s+', ' ', text)
-        return text
-
-    def extract_semanas(text):
-        pattern = r"(\d{1,2})\s*(?:semanas?|s(?:\s*\d+\s*d)?)"
-        matches = re.findall(pattern, text)
-        semanas = list(set([int(m) for m in matches if m.isdigit()]))
-        return semanas
-
-    def has_ig_above_22_semanas(text):
-        semanas = extract_semanas(text)
-        if len(semanas) == 0:
-            return False
-        return any(sem >= 22 for sem in semanas)
-
-    def classificar_obito_fetal(texto_norm, texto_original):
-        match_encontrado = None
-        pattern_match = None
-        
-        for pattern_tuple in patterns_obito:
-            pattern = pattern_tuple[0]
-            match = re.search(pattern, texto_norm)
-            if match:
-                match_encontrado = match
-                pattern_match = pattern
-                break
-
-        if match_encontrado is None:
-            return (0, None)
-
-        if not has_ig_above_22_semanas(texto_norm):
-            return (0, None)
-        
-        texto_original_str = str(texto_original)
-        texto_original_norm = normalize_text(texto_original_str)
-
-        match_original_norm = re.search(pattern_match, texto_original_norm)
-
-        if match_original_norm:
-            pos_inicio_norm = match_original_norm.start()
-            pos_fim_norm = match_original_norm.end()
-            len_original_norm = len(texto_original_norm)
-            len_original = len(texto_original_str)
-
-            if len_original_norm > 0:
-                pos_inicio = int((pos_inicio_norm / len_original_norm) * len_original)
-                pos_fim = int((pos_fim_norm / len_original_norm) * len_original)
-            else:
-                pos_inicio = 0
-                pos_fim = len_original
-        else:
-            pos_inicio_norm = match_encontrado.start()
-            pos_fim_norm = match_encontrado.end()
-            len_norm = len(texto_norm)
-            len_original = len(texto_original_str)
-
-            if len_norm > 0:
-                pos_inicio = int((pos_inicio_norm / len_norm) * len_original)
-                pos_fim = int((pos_fim_norm / len_norm) * len_original)
-            else:
-                pos_inicio = 0
-                pos_fim = len_original
-
-        pos_inicio = max(0, pos_inicio)
-        pos_fim = min(len(texto_original_str), pos_fim)
-
-        contexto = 50
-        inicio_contexto = max(0, pos_inicio - contexto)
-        fim_contexto = min(len(texto_original_str), pos_fim + contexto)
-        
-        trecho_capturado = texto_original_str[inicio_contexto:fim_contexto].strip()
-        
-        return (1, trecho_capturado)
+    print(f"📋 Registros válidos carregados: {len(bronze_pd):,}")
 
     bronze_pd['texto_norm'] = bronze_pd['DS_LAUDO_MEDICO'].apply(normalize_text)
     bronze_pd['classificacao'] = bronze_pd.apply(
@@ -165,6 +179,17 @@ if not bronze_pd.empty:
     bronze_pd['obito_fetal_clinico'] = bronze_pd['classificacao'].apply(lambda x: x[0])
     bronze_pd['termo_detectado'] = bronze_pd['classificacao'].apply(lambda x: x[1])
 
+    total_positivos = (bronze_pd['obito_fetal_clinico'] == 1).sum()
+    print(f"✅ Classificação concluída: {total_positivos:,} laudos positivos encontrados")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 5. Transformação e Deduplicação
+
+# COMMAND ----------
+
+if not bronze_pd.empty:
     silver_pd = bronze_pd[bronze_pd['obito_fetal_clinico'] == 1].copy()
     
     # Remover duplicatas baseado em LAUDO_ID (se existir) ou criar chave única
@@ -179,7 +204,7 @@ if not bronze_pd.empty:
         )
         silver_pd = silver_pd.drop_duplicates(subset=['LAUDO_ID'], keep='first')
 
-    print(f"Laudos positivos identificados: {len(silver_pd):,}")
+    print(f"📊 Laudos após deduplicação: {len(silver_pd):,}")
 
     colunas_renomear = {
         'FONTE': 'fonte',
@@ -197,12 +222,16 @@ if not bronze_pd.empty:
     silver_pd = silver_pd.rename(columns=colunas_renomear)
     silver_pd = silver_pd.drop(columns=['classificacao', 'texto_norm'], errors='ignore')
 
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 6. Gravação Silver
+
+# COMMAND ----------
+
+if not bronze_pd.empty:
     if silver_pd.empty:
-        try:
-            spark.table(SILVER_TABLE).limit(0)
-            print("ℹ️ Nenhum novo laudo positivo; Silver permanece inalterada.")
-        except AnalysisException:
-            print("ℹ️ Nenhum laudo positivo encontrado e tabela Silver ainda não existe.")
+        print("ℹ️ Nenhum laudo positivo para gravar")
     else:
         # Converter tipos com segurança
         silver_pd['dt_procedimento_realizado'] = pd.to_datetime(
@@ -241,5 +270,30 @@ if not bronze_pd.empty:
             silver_writer = silver_writer.option("overwriteSchema", "true")
         silver_writer.saveAsTable(SILVER_TABLE)
         spark.catalog.refreshTable(SILVER_TABLE)
+        
+        print("✅ Silver gravada com sucesso!")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 7. Estatísticas Finais
+
+# COMMAND ----------
+
+try:
+    silver_df = spark.table(SILVER_TABLE)
+    total = silver_df.count()
+    pacientes_unicos = silver_df.select("cd_paciente").distinct().count()
+    
+    print("=" * 80)
+    print("ESTATÍSTICAS SILVER")
+    print("=" * 80)
+    print(f"Total de laudos positivos: {total:,}")
+    print(f"Pacientes únicos: {pacientes_unicos:,}")
+    print(f"Por fonte:")
+    silver_df.groupBy("fonte").count().show()
+    print("=" * 80)
+except AnalysisException:
+    print("ℹ️ Tabela Silver ainda não existe")
 
 
