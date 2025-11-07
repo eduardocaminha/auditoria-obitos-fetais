@@ -11,6 +11,7 @@
 # COMMAND ----------
 
 from pyspark.sql import functions as F, types as T
+from pyspark.sql.utils import AnalysisException
 from datetime import datetime
 import pandas as pd
 import unicodedata
@@ -29,6 +30,11 @@ PERIODO_FIM = '2025-11-01'
 
 # Janela temporal (± em dias) para buscar outros atendimentos da mãe
 JANELA_DIAS = 7
+
+# Controle de camadas Delta
+BRONZE_TABLE = "innovation_dev.bronze.auditoria_obitos_fetais_raw"
+SILVER_TABLE = "innovation_dev.silver.auditoria_obitos_fetais_processado"
+FORCAR_REPROCESSAMENTO_BRONZE = False
 
 # Lista de CIDs associados a óbito fetal / eventos correlatos
 CID10_LIST = [
@@ -154,27 +160,34 @@ WHERE PREA.CD_PROCEDIMENTO IN ({procedimentos_csv})
   AND LAUP.DS_LAUDO_MEDICO IS NOT NULL
 """
 
-laudos_pd = run_sql(query_laudos)
+def carregar_bronze():
+    if FORCAR_REPROCESSAMENTO_BRONZE:
+        print("⚠️ Forçando reprocessamento da camada Bronze.")
+        return None
+    try:
+        bronze_df = spark.table(BRONZE_TABLE)
+        total_registros = bronze_df.count()
+        print("=" * 80)
+        print(f"BRONZE PRÉ-CARREGADA: {BRONZE_TABLE}")
+        print(f"Registros disponíveis: {total_registros:,}")
+        print("=" * 80)
+        return bronze_df
+    except AnalysisException:
+        print(f"ℹ️  Tabela Bronze {BRONZE_TABLE} indisponível. Executando extração direta no Lake.")
+        return None
 
-if len(laudos_pd) == 0:
-    print("⚠️ Nenhum laudo obstétrico encontrado para o período informado.")
-    df_laudos_pd = pd.DataFrame(columns=[
-        'FONTE', 'CD_ATENDIMENTO', 'CD_OCORRENCIA', 'CD_ORDEM', 'CD_PROCEDIMENTO',
-        'NM_PROCEDIMENTO', 'DS_LAUDO_MEDICO', 'DT_PROCEDIMENTO_REALIZADO',
-        'CD_PACIENTE', 'NM_PACIENTE'
-    ])
-else:
-    df_laudos_pd = pd.DataFrame(laudos_pd)
-    df_laudos_pd = df_laudos_pd[
-        df_laudos_pd['DS_LAUDO_MEDICO'].astype(str).str.strip().str.len() > 0
-    ]
 
-    total_exames = len(df_laudos_pd)
-    pacientes_unicos = df_laudos_pd['CD_PACIENTE'].nunique()
-    exames_por_fonte = df_laudos_pd.groupby('FONTE').size()
+def exibir_estatisticas_laudos(df_pd: pd.DataFrame):
+    if len(df_pd) == 0:
+        print("⚠️ Nenhum laudo obstétrico encontrado para o período informado.")
+        return
+
+    total_exames = len(df_pd)
+    pacientes_unicos = df_pd['CD_PACIENTE'].nunique()
+    exames_por_fonte = df_pd.groupby('FONTE').size()
 
     print("=" * 80)
-    print("ESTATÍSTICAS DOS LAUDOS EXTRAÍDOS")
+    print("ESTATÍSTICAS DOS LAUDOS DISPONÍVEIS")
     print("=" * 80)
     print(f"Total de exames: {total_exames:,}")
     print(f"Pacientes únicos: {pacientes_unicos:,}")
@@ -184,6 +197,34 @@ else:
     for fonte, qtd in exames_por_fonte.items():
         print(f"  {fonte}: {qtd:,} exames")
     print("=" * 80)
+
+
+bronze_df = carregar_bronze()
+
+if bronze_df is None:
+    laudos_pd = run_sql(query_laudos)
+
+    if len(laudos_pd) == 0:
+        df_laudos_pd = pd.DataFrame(columns=[
+            'FONTE', 'CD_ATENDIMENTO', 'CD_OCORRENCIA', 'CD_ORDEM', 'CD_PROCEDIMENTO',
+            'NM_PROCEDIMENTO', 'DS_LAUDO_MEDICO', 'DT_PROCEDIMENTO_REALIZADO',
+            'CD_PACIENTE', 'NM_PACIENTE'
+        ])
+        bronze_df = None
+    else:
+        df_laudos_pd = pd.DataFrame(laudos_pd)
+        df_laudos_pd = df_laudos_pd[
+            df_laudos_pd['DS_LAUDO_MEDICO'].astype(str).str.strip().str.len() > 0
+        ]
+
+        bronze_df = spark.createDataFrame(df_laudos_pd)
+        print(f"💾 Gravando {len(df_laudos_pd):,} laudos na camada Bronze: {BRONZE_TABLE}")
+        bronze_df.write.format("delta").mode("overwrite").saveAsTable(BRONZE_TABLE)
+        spark.catalog.refreshTable(BRONZE_TABLE)
+else:
+    df_laudos_pd = bronze_df.toPandas()
+
+exibir_estatisticas_laudos(df_laudos_pd)
 
 # COMMAND ----------
 
@@ -316,8 +357,46 @@ colunas_renomear = {
 
 df_laudos_pos_pd = df_laudos_pos_pd.rename(columns=colunas_renomear)
 df_laudos_pos_pd = df_laudos_pos_pd.drop(columns=['classificacao'], errors='ignore')
+df_laudos_pos_pd = df_laudos_pos_pd.drop(columns=['texto_norm'], errors='ignore')
 
-df_laudos = spark.createDataFrame(df_laudos_pos_pd)
+if len(df_laudos_pos_pd) > 0:
+    df_laudos_pos_pd['dt_procedimento_realizado'] = pd.to_datetime(
+        df_laudos_pos_pd['dt_procedimento_realizado'], errors='coerce'
+    )
+
+silver_schema = T.StructType([
+    T.StructField('fonte', T.StringType(), True),
+    T.StructField('cd_atendimento', T.LongType(), True),
+    T.StructField('cd_ocorrencia', T.LongType(), True),
+    T.StructField('cd_ordem', T.LongType(), True),
+    T.StructField('cd_procedimento', T.LongType(), True),
+    T.StructField('nm_procedimento', T.StringType(), True),
+    T.StructField('texto_original', T.StringType(), True),
+    T.StructField('dt_procedimento_realizado', T.TimestampType(), True),
+    T.StructField('cd_paciente', T.LongType(), True),
+    T.StructField('nm_paciente', T.StringType(), True),
+    T.StructField('obito_fetal_clinico', T.IntegerType(), True),
+    T.StructField('termo_detectado', T.StringType(), True)
+])
+
+
+def pandas_para_spark(df_pd: pd.DataFrame, schema: T.StructType):
+    if len(df_pd) == 0:
+        try:
+            return spark.table(SILVER_TABLE).limit(0)
+        except AnalysisException:
+            return spark.createDataFrame(spark.sparkContext.emptyRDD(), schema)
+    return spark.createDataFrame(df_pd)
+
+
+df_laudos = pandas_para_spark(df_laudos_pos_pd, silver_schema)
+
+if df_laudos.count() > 0:
+    print(f"💾 Gravando laudos positivos na camada Silver: {SILVER_TABLE}")
+    df_laudos.write.format("delta").mode("overwrite").saveAsTable(SILVER_TABLE)
+    spark.catalog.refreshTable(SILVER_TABLE)
+else:
+    print("⚠️ Nenhum laudo positivo para atualizar a camada Silver.")
 
 # Preparar referência temporal
 df_laudos = df_laudos.withColumn(
