@@ -243,6 +243,15 @@ if not bronze_pd.empty:
             if col in silver_pd.columns:
                 silver_pd[col] = silver_pd[col].astype(str)
 
+        # Selecionar apenas as colunas necessárias e garantir ordem correta
+        colunas_finais = [
+            'fonte', 'cd_atendimento', 'cd_ocorrencia', 'cd_ordem', 
+            'cd_procedimento', 'nm_procedimento', 'texto_original',
+            'dt_procedimento_realizado', 'cd_paciente', 'nm_paciente',
+            'obito_fetal_clinico', 'termo_detectado'
+        ]
+        silver_pd = silver_pd[colunas_finais]
+        
         silver_schema = T.StructType([
             T.StructField('fonte', T.StringType(), True),
             T.StructField('cd_atendimento', T.StringType(), True),
