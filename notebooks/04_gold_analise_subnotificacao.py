@@ -159,13 +159,13 @@ for _, laudo in df_laudos_pd.iterrows():
     
     # Buscar atendimentos da mãe na janela
     query_atend_mae = f"""
-    SELECT 'HSP' AS fonte_atend, CD_ATENDIMENTO, CD_PACIENTE, DT_ATENDIMENTO
+    SELECT 'HSP' AS FONTE_ATEND, CD_ATENDIMENTO, CD_PACIENTE, DT_ATENDIMENTO
     FROM RAWZN.RAW_HSP_TM_ATENDIMENTO
     WHERE CD_PACIENTE = {cd_paciente_mae}
       AND DT_ATENDIMENTO >= DATE '{dt_inicio}'
       AND DT_ATENDIMENTO <= DATE '{dt_fim}'
     UNION ALL
-    SELECT 'PSC' AS fonte_atend, CD_ATENDIMENTO, CD_PACIENTE, DT_ATENDIMENTO
+    SELECT 'PSC' AS FONTE_ATEND, CD_ATENDIMENTO, CD_PACIENTE, DT_ATENDIMENTO
     FROM RAWZN.RAW_PSC_TM_ATENDIMENTO
     WHERE CD_PACIENTE = {cd_paciente_mae}
       AND DT_ATENDIMENTO >= DATE '{dt_inicio}'
@@ -179,13 +179,13 @@ for _, laudo in df_laudos_pd.iterrows():
         
         # Buscar fetos vinculados
         query_fetos = f"""
-        SELECT 'HSP' AS fonte_feto, CD_ATENDIMENTO AS cd_atendimento_feto,
-               CD_PACIENTE AS cd_paciente_feto, CD_ATENDIMENTO_MAE, DT_ATENDIMENTO AS dt_atendimento_feto
+        SELECT 'HSP' AS FONTE_FETO, CD_ATENDIMENTO AS CD_ATENDIMENTO_FETO,
+               CD_PACIENTE AS CD_PACIENTE_FETO, CD_ATENDIMENTO_MAE, DT_ATENDIMENTO AS DT_ATENDIMENTO_FETO
         FROM RAWZN.RAW_HSP_TM_ATENDIMENTO
         WHERE CD_ATENDIMENTO_MAE IN ({cd_atend_maes})
         UNION ALL
-        SELECT 'PSC' AS fonte_feto, CD_ATENDIMENTO AS cd_atendimento_feto,
-               CD_PACIENTE AS cd_paciente_feto, CD_ATENDIMENTO_MAE, DT_ATENDIMENTO AS dt_atendimento_feto
+        SELECT 'PSC' AS FONTE_FETO, CD_ATENDIMENTO AS CD_ATENDIMENTO_FETO,
+               CD_PACIENTE AS CD_PACIENTE_FETO, CD_ATENDIMENTO_MAE, DT_ATENDIMENTO AS DT_ATENDIMENTO_FETO
         FROM RAWZN.RAW_PSC_TM_ATENDIMENTO
         WHERE CD_ATENDIMENTO_MAE IN ({cd_atend_maes})
         """
@@ -206,10 +206,10 @@ for _, laudo in df_laudos_pd.iterrows():
                         'cd_atendimento_laudo': cd_atend_laudo,
                         'cd_atendimento_mae': atend['CD_ATENDIMENTO'],
                         'dt_atendimento_mae': atend['DT_ATENDIMENTO'],
-                        'fonte_feto': feto['fonte_feto'],
-                        'cd_atendimento_feto': feto['cd_atendimento_feto'],
-                        'cd_paciente_feto': feto['cd_paciente_feto'],
-                        'dt_atendimento_feto': feto['dt_atendimento_feto'],
+                        'fonte_feto': feto['FONTE_FETO'],
+                        'cd_atendimento_feto': feto['CD_ATENDIMENTO_FETO'],
+                        'cd_paciente_feto': feto['CD_PACIENTE_FETO'],
+                        'dt_atendimento_feto': feto['DT_ATENDIMENTO_FETO'],
                         'origem': 'LAUDO'
                     })
             else:
@@ -383,13 +383,13 @@ for _, cid_row in df_cids_pd.iterrows():
     
     # Buscar atendimentos relacionados na janela
     query_atend = f"""
-    SELECT 'HSP' AS fonte_atend, CD_ATENDIMENTO, CD_PACIENTE, CD_ATENDIMENTO_MAE, DT_ATENDIMENTO
+    SELECT 'HSP' AS FONTE_ATEND, CD_ATENDIMENTO, CD_PACIENTE, CD_ATENDIMENTO_MAE, DT_ATENDIMENTO
     FROM RAWZN.RAW_HSP_TM_ATENDIMENTO
     WHERE CD_PACIENTE = {cd_paciente}
       AND DT_ATENDIMENTO >= DATE '{dt_inicio}'
       AND DT_ATENDIMENTO <= DATE '{dt_fim}'
     UNION ALL
-    SELECT 'PSC' AS fonte_atend, CD_ATENDIMENTO, CD_PACIENTE, CD_ATENDIMENTO_MAE, DT_ATENDIMENTO
+    SELECT 'PSC' AS FONTE_ATEND, CD_ATENDIMENTO, CD_PACIENTE, CD_ATENDIMENTO_MAE, DT_ATENDIMENTO
     FROM RAWZN.RAW_PSC_TM_ATENDIMENTO
     WHERE CD_PACIENTE = {cd_paciente}
       AND DT_ATENDIMENTO >= DATE '{dt_inicio}'
