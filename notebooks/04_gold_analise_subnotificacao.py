@@ -49,28 +49,28 @@ BRONZE_CID_TABLE = "innovation_dev.bronze.auditoria_obitos_cids"
 AUDITORIA_TABLE = "RAWZN.RAW_HSP_TB_AUDITORIA_OBITO"
 
 # Controle de camadas
-FORCAR_REPROCESSAMENTO_CID = False  # True para forçar nova extração dos CIDs
+FORCAR_REPROCESSAMENTO_CID = True  # True para forçar nova extração dos CIDs (CIDs corrigidos sem ponto)
 
-# CIDs associados a óbito fetal
+# CIDs associados a óbito fetal (SEM PONTO - formato do Lake)
 CID10_LIST = [
     # Núcleo (altamente específicos)
     'P95',      # Morte fetal de causa não especificada
-    'P96.4',    # Morte neonatal precoce de causa não especificada
-    'O36.4',    # Cuidado materno por morte intrauterina
-    'O31.1',    # Morte de um feto ou mais em gestação múltipla
-    'O31.2',    # Feto papiráceo
-    'Z37.1',    # Nascimento de feto morto único
-    'Z37.3',    # Gêmeos – um vivo e um morto
-    'Z37.4',    # Gêmeos – ambos mortos
-    'Z37.6',    # Múltiplos – alguns vivos e outros mortos
-    'Z37.7',    # Múltiplos – todos mortos
+    'P964',     # Morte neonatal precoce de causa não especificada
+    'O364',     # Cuidado materno por morte intrauterina
+    'O311',     # Morte de um feto ou mais em gestação múltipla
+    'O312',     # Feto papiráceo
+    'Z371',     # Nascimento de feto morto único
+    'Z373',     # Gêmeos – um vivo e um morto
+    'Z374',     # Gêmeos – ambos mortos
+    'Z376',     # Múltiplos – alguns vivos e outros mortos
+    'Z377',     # Múltiplos – todos mortos
     # Contexto forte (placenta/cordão)
-    'O43.1',    # Descolamento prematuro da placenta
-    'O69.1',    # Compressão do cordão umbilical
-    'O69.2',    # Prolapso do cordão umbilical
-    'O69.3',    # Circular de cordão com compressão
-    'O69.8',    # Outras complicações do cordão
-    'O69.9',    # Complicação não especificada do cordão
+    'O431',     # Descolamento prematuro da placenta
+    'O691',     # Compressão do cordão umbilical
+    'O692',     # Prolapso do cordão umbilical
+    'O693',     # Circular de cordão com compressão
+    'O698',     # Outras complicações do cordão
+    'O699',     # Complicação não especificada do cordão
 ]
 
 # Output
