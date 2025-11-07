@@ -769,7 +769,70 @@ print("=" * 80)
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 10. Filtrar Apenas Subnotificações
+# MAGIC ## 10. Enriquecer com Laudos e CIDs
+
+# COMMAND ----------
+
+print("🔍 Enriquecendo dados com laudos e CIDs...")
+
+df_enriquecido_pd = df_com_auditoria.toPandas()
+
+# Buscar laudos (apenas o mais recente para cada mãe)
+laudos_silver_pd = df_laudos_silver.select(
+    'cd_paciente', 'dt_procedimento_realizado', 'laudo', 'termo_detectado'
+).toPandas()
+
+# Para cada paciente principal, buscar o laudo mais recente
+def buscar_ultimo_laudo(cd_paciente):
+    if pd.isna(cd_paciente):
+        return None
+    
+    laudos_paciente = laudos_silver_pd[laudos_silver_pd['cd_paciente'] == cd_paciente]
+    if len(laudos_paciente) == 0:
+        return None
+    
+    # Ordenar por data e pegar o mais recente
+    laudos_paciente = laudos_paciente.sort_values('dt_procedimento_realizado', ascending=False)
+    laudo_recente = laudos_paciente.iloc[0]['laudo']
+    
+    # Limitar tamanho do laudo para não quebrar Excel
+    if laudo_recente and len(str(laudo_recente)) > 500:
+        return str(laudo_recente)[:497] + "..."
+    return laudo_recente
+
+# Buscar CIDs
+cids_bronze_pd = df_cids.select('CD_PACIENTE', 'CD_CID10').toPandas()
+
+def buscar_cids(cd_paciente):
+    if pd.isna(cd_paciente):
+        return None
+    
+    cids_paciente = cids_bronze_pd[cids_bronze_pd['CD_PACIENTE'] == cd_paciente]
+    if len(cids_paciente) == 0:
+        return None
+    
+    # Retornar lista única de CIDs
+    cids_lista = cids_paciente['CD_CID10'].unique().tolist()
+    return ", ".join(cids_lista)
+
+print("   Buscando laudos das mães...")
+df_enriquecido_pd['laudo_mae'] = df_enriquecido_pd['cd_paciente_principal'].apply(buscar_ultimo_laudo)
+
+print("   Buscando CIDs das mães...")
+df_enriquecido_pd['cids_mae'] = df_enriquecido_pd['cd_paciente_principal'].apply(buscar_cids)
+
+print("   Buscando CIDs dos fetos...")
+df_enriquecido_pd['cids_feto'] = df_enriquecido_pd['cd_paciente_feto'].apply(buscar_cids)
+
+# Converter de volta para Spark
+df_com_auditoria = spark.createDataFrame(df_enriquecido_pd)
+
+print("✅ Dados enriquecidos com laudos e CIDs")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 11. Filtrar Apenas Subnotificações
 
 # COMMAND ----------
 
@@ -790,13 +853,32 @@ if df_subnotificacoes.count() > 0:
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 11. Exportar para Excel
+# MAGIC ## 12. Exportar para Excel
 
 # COMMAND ----------
 
 # Converter para pandas
 subnotificacoes_pd = df_subnotificacoes.toPandas()
 todos_casos_pd = df_com_auditoria.toPandas()
+
+# Reordenar colunas para melhor visualização
+colunas_ordenadas = [
+    'cd_paciente_principal',
+    'nm_paciente_principal',
+    'cd_paciente_feto',
+    'nm_paciente_feto',
+    'tem_feto_vinculado',
+    'origem_deteccao',
+    'laudo_mae',
+    'cids_mae',
+    'cids_feto',
+    'na_auditoria'
+]
+
+# Aplicar reordenação (se todas as colunas existirem)
+colunas_existentes = [col for col in colunas_ordenadas if col in subnotificacoes_pd.columns]
+subnotificacoes_pd = subnotificacoes_pd[colunas_existentes]
+todos_casos_pd = todos_casos_pd[colunas_existentes]
 
 # Estatísticas
 stats_origem = todos_casos_pd.groupby(['origem_deteccao', 'na_auditoria']).size().reset_index(name='total')
@@ -877,12 +959,19 @@ print(f"   2. Subnotificações ({len(subnotificacoes_pd):,} casos)")
 print(f"   3. Todos os Casos ({len(todos_casos_pd):,} registros)")
 print(f"   4. Estatísticas por Origem")
 print(f"   5. Estatísticas Feto Identificado")
+print(f"\n📋 Colunas incluídas:")
+print(f"   • cd_paciente_principal / nm_paciente_principal")
+print(f"   • cd_paciente_feto / nm_paciente_feto")
+print(f"   • laudo_mae (último laudo do US)")
+print(f"   • cids_mae (CIDs da mãe)")
+print(f"   • cids_feto (CIDs do feto, quando houver)")
+print(f"   • tem_feto_vinculado, origem_deteccao, na_auditoria")
 print("=" * 80)
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 12. Resumo Final
+# MAGIC ## 13. Resumo Final
 
 # COMMAND ----------
 
