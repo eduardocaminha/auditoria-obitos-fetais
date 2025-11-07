@@ -611,39 +611,85 @@ df_consolidado_nomes.createOrReplaceTempView("vw_pares_com_nomes")
 
 # COMMAND ----------
 
-# Buscar CD_ATENDIMENTO da auditoria e obter CD_PACIENTE via JOIN
-query_auditoria = """
-SELECT DISTINCT A.CD_PACIENTE
-FROM RAWZN.RAW_HSP_TB_AUDITORIA_OBITO AUD
-INNER JOIN RAWZN.RAW_HSP_TM_ATENDIMENTO A
-    ON AUD.CD_ATENDIMENTO = A.CD_ATENDIMENTO
-UNION
-SELECT DISTINCT A.CD_PACIENTE
-FROM RAWZN.RAW_HSP_TB_AUDITORIA_OBITO AUD
-INNER JOIN RAWZN.RAW_PSC_TM_ATENDIMENTO A
-    ON AUD.CD_ATENDIMENTO = A.CD_ATENDIMENTO
-"""
+# Coletar todos CD_ATENDIMENTO dos casos detectados (Laudos + CIDs)
+# Vou buscar apenas esses específicos na auditoria (muito mais eficiente)
 
-auditoria_pd = run_sql(query_auditoria)
-pacientes_auditados = set(auditoria_pd['CD_PACIENTE'].values)
+# CD_ATENDIMENTO dos laudos
+atendimentos_laudos = set(
+    silver_pd[silver_pd['cd_atendimento'].notna()]['cd_atendimento'].astype(str).values
+)
 
-print(f"📋 Pacientes na auditoria oficial: {len(pacientes_auditados):,}")
+# CD_ATENDIMENTO dos CIDs
+atendimentos_cids = set(
+    cids_pd[cids_pd['CD_ATENDIMENTO'].notna()]['CD_ATENDIMENTO'].astype(str).values
+)
 
-# Marcar quem está na auditoria
+# União de todos os CD_ATENDIMENTO detectados
+todos_atendimentos = atendimentos_laudos.union(atendimentos_cids)
+
+print(f"📋 Total de CD_ATENDIMENTO a verificar na auditoria: {len(todos_atendimentos):,}")
+print(f"   - Laudos: {len(atendimentos_laudos):,}")
+print(f"   - CIDs: {len(atendimentos_cids):,}")
+
+# Criar lista para IN clause (limitada para evitar query muito grande)
+MAX_BATCH = 1000
+batches = [list(todos_atendimentos)[i:i+MAX_BATCH] for i in range(0, len(todos_atendimentos), MAX_BATCH)]
+
+atendimentos_na_auditoria = set()
+
+for batch_idx, batch in enumerate(batches, 1):
+    cd_atendimentos_str = ','.join(batch)
+    
+    query_batch = f"""
+    SELECT DISTINCT CD_ATENDIMENTO
+    FROM RAWZN.RAW_HSP_TB_AUDITORIA_OBITO
+    WHERE CD_ATENDIMENTO IN ({cd_atendimentos_str})
+    """
+    
+    try:
+        batch_result = run_sql(query_batch)
+        atendimentos_na_auditoria.update(batch_result['CD_ATENDIMENTO'].astype(str).values)
+        print(f"   Batch {batch_idx}/{len(batches)}: {len(batch_result)} atendimentos encontrados")
+    except Exception as e:
+        print(f"   ⚠️  Erro no batch {batch_idx}: {str(e)}")
+
+print(f"✅ Total de CD_ATENDIMENTO encontrados na auditoria: {len(atendimentos_na_auditoria):,}")
+
+# Marcar atendimentos dos casos detectados que estão na auditoria
+# Laudos
+silver_pd['atendimento_na_auditoria'] = silver_pd['cd_atendimento'].astype(str).apply(
+    lambda x: x in atendimentos_na_auditoria
+)
+
+# CIDs
+cids_pd['atendimento_na_auditoria'] = cids_pd['CD_ATENDIMENTO'].astype(str).apply(
+    lambda x: x in atendimentos_na_auditoria
+)
+
+# Agora verifico: cada caso no consolidado está na auditoria?
+# Um caso está na auditoria se seu CD_ATENDIMENTO original (laudo ou CID) está lá
 df_consolidado_nomes_pd = df_consolidado_nomes.toPandas()
 
-df_consolidado_nomes_pd['principal_na_auditoria'] = df_consolidado_nomes_pd['cd_paciente_principal'].apply(
-    lambda x: 'SIM' if pd.notna(x) and int(x) in pacientes_auditados else 'NAO'
-)
+# Para cada linha do consolidado, verifico se veio de um atendimento auditado
+def verificar_auditoria(row):
+    cd_principal = str(row['cd_paciente_principal'])
+    origem = row['origem_deteccao']
+    
+    # Verificar nos laudos
+    if 'LAUDO' in origem:
+        laudos_match = silver_pd[silver_pd['cd_paciente'].astype(str) == cd_principal]
+        if not laudos_match.empty and laudos_match['atendimento_na_auditoria'].any():
+            return 'SIM'
+    
+    # Verificar nos CIDs
+    if 'CID' in origem:
+        cids_match = cids_pd[cids_pd['CD_PACIENTE'].astype(str) == cd_principal]
+        if not cids_match.empty and cids_match['atendimento_na_auditoria'].any():
+            return 'SIM'
+    
+    return 'NAO'
 
-df_consolidado_nomes_pd['feto_na_auditoria'] = df_consolidado_nomes_pd['cd_paciente_feto'].apply(
-    lambda x: 'SIM' if pd.notna(x) and int(x) in pacientes_auditados else 'NAO'
-)
-
-df_consolidado_nomes_pd['na_auditoria'] = df_consolidado_nomes_pd.apply(
-    lambda row: 'SIM' if row['principal_na_auditoria'] == 'SIM' or row['feto_na_auditoria'] == 'SIM' else 'NAO',
-    axis=1
-)
+df_consolidado_nomes_pd['na_auditoria'] = df_consolidado_nomes_pd.apply(verificar_auditoria, axis=1)
 
 df_com_auditoria = spark.createDataFrame(df_consolidado_nomes_pd)
 
