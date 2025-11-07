@@ -29,18 +29,37 @@ JANELA_DIAS = 7
 
 # Lista de CIDs associados a óbito fetal / eventos correlatos
 CID10_LIST = [
-    'P95',   # Morte fetal
-    'P964',  # Outros transtornos respiratórios do recém-nascido após anestesia materna e analgésicos durante trabalho de parto e parto
-    'P011',  # Feto e recém-nascido afetados por placenta prévia
-    'P021',  # Feto e recém-nascido afetados por outras formas de descolamento placentário e hemorragia anteparto
-    'P039',  # Feto e recém-nascido afetados por complicações de cordão umbilical, não especificadas
-    'P059',  # Transtornos relacionados ao crescimento fetal não especificados
-    'P969',  # Transtorno perinatal não especificado
-    'O365',  # Óbito fetal intraparto
-    'O368',  # Outros problemas fetais especificados
-    'O3654', # Óbito fetal durante o trabalho de parto
-    'Z371',  # Gestação única com óbito fetal
-    'Z370'   # Gestação única com nascido vivo (usado para comparação / possíveis inconsistências)
+    # Núcleo (altamente específicos para óbito fetal)
+    'P95',   # Morte fetal de causa não especificada
+    'P96.4', # Morte neonatal precoce de causa não especificada (monitorar possíveis falsos positivos)
+    'O36.4', # Cuidado materno por morte intrauterina de um ou mais fetos
+    'O31.1', # Morte de um feto ou mais em gestação múltipla
+    'O31.2', # Feto papiráceo (indica morte de co-gêmeo)
+    'Z37.1', # Nascimento de um feto morto, único
+    'Z37.3', # Gêmeos – um nascido vivo e um morto
+    'Z37.4', # Gêmeos – ambos mortos
+    'Z37.6', # Outros múltiplos – alguns vivos e outros mortos
+    'Z37.7', # Outros múltiplos – todos mortos
+
+    # Contexto forte (placenta/cordão) – manter em produção com validação adicional
+    'O43.1', # Descolamento prematuro da placenta
+    'O69.1', # Compressão do cordão umbilical
+    'O69.2', # Prolapso do cordão umbilical
+    'O69.3', # Circular de cordão com compressão
+    'O69.8', # Outras complicações do cordão umbilical
+    'O69.9', # Complicação não especificada do cordão umbilical
+
+    # 'O36.5', # (avaliar disponibilidade local) cuidado materno por morte fetal tardia
+    # 'P964',  # Transtorno respiratório do RN após anestesia materna – pouco específico para óbito fetal
+    # 'P011',  # Feto afetado por placenta prévia – indicativo, porém não implica óbito
+    # 'P021',  # Feto afetado por descolamento placentário – manter em monitoramento
+    # 'P039',  # Complicações de cordão – cobertas por O69.*
+    # 'P059',  # Transtornos de crescimento fetal – pouco específico
+    # 'P969',  # Transtorno perinatal não especificado – alto risco de falso positivo
+    # 'O365',  # Óbito fetal intraparto – substituído por O36.4/O31.*
+    # 'O368',  # Problemas fetais especificados – revisar lista local antes de ativar
+    # 'O3654', # Óbito fetal durante trabalho de parto – granularidade não disponível em todos os sistemas
+    # 'Z370',  # Gestação única com nascido vivo – usar apenas para análises de contraste
 ]
 
 # Tabela da auditoria oficial (ajuste se necessário)
