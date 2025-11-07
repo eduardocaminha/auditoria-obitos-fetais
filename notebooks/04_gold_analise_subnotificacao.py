@@ -611,10 +611,17 @@ df_consolidado_nomes.createOrReplaceTempView("vw_pares_com_nomes")
 
 # COMMAND ----------
 
-# Buscar lista de pacientes na auditoria
+# Buscar lista de pacientes na auditoria (via JOIN com atendimentos)
 query_auditoria = """
-SELECT DISTINCT CD_PACIENTE
-FROM RAWZN.TB_AUDITORIA_OBITO_ITEM
+SELECT DISTINCT A.CD_PACIENTE
+FROM RAWZN.TB_AUDITORIA_OBITO_ITEM AUD
+INNER JOIN RAWZN.RAW_HSP_TM_ATENDIMENTO A
+    ON AUD.CD_ATENDIMENTO = A.CD_ATENDIMENTO
+UNION
+SELECT DISTINCT A.CD_PACIENTE
+FROM RAWZN.TB_AUDITORIA_OBITO_ITEM AUD
+INNER JOIN RAWZN.RAW_PSC_TM_ATENDIMENTO A
+    ON AUD.CD_ATENDIMENTO = A.CD_ATENDIMENTO
 """
 
 auditoria_pd = run_sql(query_auditoria)
